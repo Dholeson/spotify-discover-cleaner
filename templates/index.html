@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0d0d0d">
+<title>Discover Cleaner</title>
+<link rel="icon" type="image/svg+xml" href="{{ asset_url('favicon.svg') }}">
+<link rel="stylesheet" href="{{ asset_url('css/tokens.css') }}">
+<link rel="stylesheet" href="{{ asset_url('css/base.css') }}">
+<link rel="stylesheet" href="{{ asset_url('css/charts.css') }}">
+{%- for v in ['now', 'insights', 'artist', 'artists', 'library', 'search', 'settings', 'styleguide'] %}
+<link rel="stylesheet" href="{{ asset_url('css/views/' ~ v ~ '.css') }}">
+{%- endfor %}
+<script type="application/json" id="app-config">{{ {"pollIntervalMs": ((poll_interval or 3) * 1000) | int} | tojson }}</script>
+</head>
+<body data-js-errors="0">
+<button type="button" class="skip-link" data-action="skip-to-content">Skip to content</button>
+
+<div class="app" id="app">
+  <nav class="rail" aria-label="Main">
+    <a class="rail-brand" href="#/now" aria-label="Discover Cleaner home">
+      <img src="{{ asset_url('favicon.svg') }}" alt="" width="32" height="32">
+      <span class="rail-brand-name">Discover Cleaner</span>
+    </a>
+    <ul class="rail-nav" role="list">
+      <li><a class="rail-link" href="#/now" data-nav="now"><span data-icon="now" aria-hidden="true"></span><span class="rail-label">Now</span></a></li>
+      <li><a class="rail-link" href="#/insights" data-nav="insights"><span data-icon="insights" aria-hidden="true"></span><span class="rail-label">Insights</span></a></li>
+      <li><a class="rail-link" href="#/artists" data-nav="artists"><span data-icon="artists" aria-hidden="true"></span><span class="rail-label">Artists</span></a></li>
+      <li><a class="rail-link" href="#/library" data-nav="library"><span data-icon="library" aria-hidden="true"></span><span class="rail-label">Library</span></a></li>
+      <li class="rail-end"><a class="rail-link" href="#/settings" data-nav="settings"><span data-icon="settings" aria-hidden="true"></span><span class="rail-label">Settings</span></a></li>
+    </ul>
+  </nav>
+
+  <header class="topbar">
+    <div class="search" role="search">
+      <div class="search-field">
+        <span data-icon="search" aria-hidden="true"></span>
+        <input id="global-search" class="search-input" type="search" placeholder="Search artists, songs, albums"
+               autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"
+               role="combobox" aria-expanded="false" aria-controls="search-panel" aria-autocomplete="list"
+               aria-label="Search your library and Spotify">
+        <kbd class="search-hint" aria-hidden="true">/</kbd>
+        <button type="button" class="search-clear" aria-label="Clear search" hidden><span data-icon="close" aria-hidden="true"></span></button>
+      </div>
+      <div id="search-panel" class="search-panel" role="listbox" aria-label="Search suggestions" hidden></div>
+    </div>
+    <div class="topbar-right">
+      <div id="spotify-status" class="status-slot"></div>
+      <button type="button" class="btn btn-icon shortcuts-btn" data-action="show-shortcuts" aria-label="Keyboard shortcuts" data-tip="Keyboard shortcuts (?)" data-tip-placement="bottom"><span data-icon="keyboard" aria-hidden="true"></span></button>
+      <div id="user-chip" class="user-chip" hidden><span class="avatar" aria-hidden="true"></span><span class="user-name truncate"></span></div>
+    </div>
+  </header>
+
+  <main id="view" tabindex="-1">
+    <div class="view"><div class="state" role="status"><div class="spinner" aria-hidden="true"></div><div class="state-body">Loading…</div></div></div>
+  </main>
+
+  <section id="player" class="player" aria-label="Player"></section>
+</div>
+
+<div id="toast-region" class="toast-region" aria-live="polite"></div>
+<div id="modal-root"></div>
+<noscript><p style="padding:24px;color:#fff">Discover Cleaner needs JavaScript. The classic view is at <a href="/classic">/classic</a>.</p></noscript>
+
+<script src="{{ asset_url('js/boot.js') }}"></script>
+<script type="module" src="{{ asset_url('js/main.js') }}"></script>
+</body>
+</html>

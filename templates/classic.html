@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<title>Spotify Discover Cleaner</title>
+<link rel="stylesheet" href="{{ asset_url('classic/app.css') }}">
+</head>
+<body>
+
+<!-- Profile bar (fixed top) -->
+<div class="profile-bar" id="profile-bar" role="banner">
+  <div class="profile-bar-spacer"></div>
+  <div class="topbar-search" id="topbar-search">
+    <span class="topbar-search-icon" aria-hidden="true">&#128269;</span>
+    <input type="text" id="topbar-search-input" class="topbar-search-input"
+           placeholder="Search songs, artists..." autocomplete="off" aria-label="Search Spotify">
+    <div class="topbar-search-results" id="topbar-search-results" style="display:none"></div>
+  </div>
+  <button class="profile-btn" id="profile-menu-btn" onclick="toggleProfileMenu()" aria-haspopup="true" aria-expanded="false" aria-label="Profile menu">
+    <span class="profile-avatar" aria-hidden="true">&#128100;</span>
+    <span class="profile-name" id="profile-name">Spotify</span>
+    <span class="profile-caret" aria-hidden="true">&#9662;</span>
+  </button>
+</div>
+<div class="profile-menu-backdrop" id="profile-menu-backdrop" onclick="closeProfileMenu()"></div>
+<div class="profile-menu" id="profile-menu" role="menu" aria-labelledby="profile-menu-btn">
+  <button class="profile-menu-item" role="menuitem" onclick="closeProfileMenu();openSettings();" aria-label="Open settings">&#9881; Settings</button>
+</div>
+
+<!-- Polling paused badge (floating) -->
+<button class="poll-pause-badge" id="poll-pause-badge" onclick="togglePolling()" title="Click to resume">
+  Polling paused - click to resume
+</button>
+
+<!-- Persistent left sidebar -->
+<div class="app-sidebar" id="app-sidebar" role="navigation" aria-label="Queue and history">
+
+  <div class="sb-topbar">
+    <button class="sb-tab active" id="tab-queue" onclick="switchSidebarTab('queue')">Queue <span class="queue-count-badge" id="queue-count"></span></button>
+    <button class="sb-tab" id="tab-history" onclick="switchSidebarTab('history')">History</button>
+    <button class="sb-tab" id="tab-liked" onclick="switchSidebarTab('liked')">Liked Songs</button>
+    <div class="sb-spacer"></div>
+    <button class="sb-icon-btn" id="sidebar-refresh-btn" onclick="loadQueue(true)" title="Refresh" aria-label="Refresh queue">&#8635;</button>
+
+  </div>
+
+  <div class="sb-pl-strip" onclick="toggleSidebarPicker()" title="Change playlist">
+    <span class="sb-pl-name" id="sidebar-pl-name">&#8212;</span>
+    <div class="sb-pl-meta-row">
+      <span class="sb-pl-count" id="sidebar-pl-count"></span>
+      <span class="sb-pl-duration" id="sidebar-pl-duration"></span>
+    </div>
+  </div>
+
+  <div class="sidebar-pl-picker" id="sidebar-pl-picker">
+    <div class="pl-combo" id="pl-combo-sidebar">
+      <input type="text" id="pl-search" class="pl-combo-input" placeholder="Search playlists or paste URL&#8230;" autocomplete="off" aria-label="Search playlists or paste Spotify URL">
+      <div class="pl-combo-list hidden" id="pl-combo-sidebar-list"></div>
+      <input type="hidden" id="pl-select-val">
+    </div>
+  </div>
+
+  <div class="sidebar-search-wrap">
+    <input type="text" id="sidebar-search" class="sidebar-search-input" placeholder="Filter queue&#8230;" autocomplete="off" aria-label="Filter queue">
+  </div>
+
+    <div class="sidebar-queue-body" id="sidebar-queue-panel">
+    <div id="queue-list"></div>
+  </div>
+  <div class="sidebar-queue-body" id="sidebar-history-panel" style="display:none">
+    <div id="sidebar-history-list"><div class="queue-empty">No activity yet.</div></div>
+  </div>
+  <div class="sidebar-queue-body" id="sidebar-liked-panel" style="display:none">
+    <div id="sidebar-liked-list"><div class="queue-empty">No liked songs loaded yet.</div></div>
+  </div>
+
+  <div class="sidebar-resize" id="sidebar-resize"></div>
+
+  <!-- Manila folder pull-tab -->
+  <button class="sidebar-fold-tab" id="sidebar-fold-tab" onclick="toggleSidebarFold()"
+          aria-label="Toggle sidebar" title="Toggle sidebar">
+    <span class="fold-icon" id="fold-icon" aria-hidden="true">&#8249;</span>
+  </button>
+</div>
+
+<!-- Player bar (fixed bottom) -->
+<div class="player-bar" id="player-bar" role="region" aria-label="Now playing">
+  <button class="player-bar-handle" id="bar-expand-btn"
+          onclick="toggleNowDetailDrawer()" title="Expand now playing details"
+          aria-expanded="false" aria-label="Expand now playing details">
+    <span class="player-bar-handle-caret" id="player-bar-handle-caret">&#9650;</span>
+  </button>
+  <div class="player-bar-controls">
+    <div class="player-bar-left">
+      <div class="bar-icon-group" role="group" aria-label="Track actions">
+        <button class="bar-icon-btn fav-btn" id="btn-fav" disabled
+                title="Toggle favorite artist" aria-label="Toggle favorite artist"
+                aria-pressed="false">&#9734;</button>
+        <button class="bar-icon-btn like-btn" id="btn-like" disabled
+                title="Like this track" aria-label="Like this track"
+                aria-pressed="false">&#9825;</button>
+        <button class="bar-icon-btn pl-btn" id="btn-add-pl-toggle" disabled
+                title="Add to playlist" aria-label="Add to playlist"
+                aria-pressed="false">&#43;</button>
+        <button class="bar-research-btn" id="btn-research" disabled
+                title="Add to Research Queue" aria-label="Add to Research Queue"
+                onclick="openResearchModal('track', window._lastTrack&&window._lastTrack.id, window._lastTrack&&window._lastTrack.name)">&#128269;</button>
+      </div>
+      <img id="now-art" class="bar-art" src="" alt="Album art">
+      <div class="bar-meta">
+        <div class="bar-title bar-marquee"><span id="now-title" class="marquee-inner">Nothing playing</span></div>
+        <div class="bar-artist bar-marquee artist-link" id="now-artist"><span id="now-artist-text" class="marquee-inner">Start a song on Spotify</span></div>
+        <div class="bar-genres bar-marquee"><div class="marquee-inner bar-genres-track" id="now-genres"></div></div>
+      </div>
+    </div>
+    <div class="player-bar-center">
+      <div class="bar-controls" role="group" aria-label="Playback controls">
+        <button class="player-btn" id="btn-prev" title="Previous track"
+                aria-label="Previous track" onclick="playerAction('prev')">&#9198;</button>
+        <button class="player-btn play-pause" id="btn-play-pause" title="Play / Pause"
+                aria-label="Play or pause" onclick="playerAction('toggle')"><span class="player-btn-glyph">&#9654;</span></button>
+        <button class="player-btn" id="btn-next" title="Next track"
+                aria-label="Next track" onclick="playerAction('next')">&#9197;</button>
+      </div>
+      <div class="bar-progress-row">
+        <span class="bar-time" id="track-pos" aria-live="off">0:00</span>
+        <div class="bar-progress-track" id="bar-progress-track"
+             role="slider" aria-label="Seek track"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="bar-progress-fill" id="track-progress" style="width:0%"></div>
+          <div class="bar-threshold-marker" id="bar-threshold-marker" style="left:0%;display:none"
+               aria-hidden="true"></div>
+        </div>
+        <span class="bar-time" id="track-dur">0:00</span>
+      </div>
+    </div>
+    <div class="player-bar-right" aria-hidden="true"></div>
+    <!-- hidden compat spans for JS refs -->
+    <span id="threshold-info" hidden>30s</span>
+    <span id="listened-sec" hidden>0s</span>
+    <span id="threshold-progress" hidden></span>
+    <span id="now-badges" hidden></span>
+  </div>
+  <div class="player-bar-detail" id="player-bar-detail">
+    <div id="artist-picker-row" class="artist-picker" style="display:none"></div>
+    <div class="now-detail-grid">
+      <div class="workspace-card-shell inner">
+        <div class="card" id="artist-about-card"><div class="spinner-wrap"><span class="spinner"></span>Waiting for artist context</div></div>
+      </div>
+      <div class="workspace-card-shell inner">
+        <div class="card" id="artist-recs-card"><div class="spinner-wrap"><span class="spinner"></span>Waiting for artist analytics</div></div>
+      </div>
+      <div style="display:none" id="artist-now-top-card"></div>
+      <div class="workspace-card-shell inner now-detail-lyrics-card">
+        <div class="lyrics-controls">
+          <label>Lyrics offset</label>
+          <button id="lyr-offset-down-inline" class="lyr-step" title="Earlier">-</button>
+          <input type="range" id="lyr-offset-inline" min="-10" max="10" step="0.1" value="0">
+          <button id="lyr-offset-up-inline" class="lyr-step" title="Later">+</button>
+          <span id="lyr-offset-val-inline" class="lyr-offset-val">+0.0s</span>
+          <button id="lyr-offset-reset-inline" class="lyr-reset" title="Reset">reset</button>
+        </div>
+        <div class="card" id="lyrics-card"><div class="spinner-wrap"><span class="spinner"></span>Waiting for lyrics</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add-to-playlist panel (floats above player bar) -->
+<div class="add-pl-panel" id="add-pl-panel">
+  <div class="label">Add this song to one of your playlists</div>
+  <div class="pl-combo" id="pl-combo-add">
+    <input type="text" id="add-pl-search" class="pl-combo-input" placeholder="Search or pick a playlist..." autocomplete="off" aria-label="Search playlists">
+    <div class="pl-combo-list hidden" id="pl-combo-add-list"></div>
+    <input type="hidden" id="add-pl-select-val">
+  </div>
+  <label class="check-row">
+    <input type="checkbox" id="add-pl-remove" checked>
+    <span>Also remove from discover playlist</span>
+  </label>
+  <div class="btn-row">
+    <button id="btn-confirm-add" class="confirm-add">Add to playlist</button>
+  </div>
+</div>
+
+<div class="app-main" id="app-main">
+<div class="page-wrap">
+
+
+  <div id="toast" class="toast" style="display:none"></div>
+  <div id="error" class="err" style="display:none"></div>
+<div id="spotify-search-cooldown" class="cooldown-banner" style="display:none" onclick="openDevErrors()" title="Open error details">
+  <div id="spotify-search-cooldown-copy" class="cooldown-copy"><strong>Spotify search cooldown</strong><br>Artist lookups and similar-track search are temporarily cooling off.</div>
+  <div class="cooldown-actions">
+    <button id="spotify-guard-clear-btn" class="cooldown-clear-btn" type="button" style="display:none" onclick="event.stopPropagation(); clearLocalGuardState()">clear local</button>
+    <div id="spotify-search-cooldown-badge" class="cooldown-badge">0s</div>
+  </div>
+</div>
+
+  <div id="login-section" style="display:none">
+    <div class="card login-card">
+      <div style="font-size: 15px; margin-bottom: 4px;">Connect your Spotify</div>
+      <div class="sub">First-time setup, or scopes were updated.</div>
+      <a class="btn-login" href="/login">Log in with Spotify</a>
+    </div>
+  </div>
+
+  <div id="app-section" style="display:none">
+
+    <div class="dashboard">
+
+      <!-- hidden elements for JS compat -->
+      <span id="pl-name" style="display:none">-</span>
+      <span id="pl-count" style="display:none">-</span>
+      <!-- catch-up button moved to profile dropdown -->
+
+      <!-- Main column -->
+      <main class="cell main">
+        <section class="artist-page-view" id="artist-page-view">
+          <div class="artist-page-top">
+            <button class="artist-page-back" type="button" onclick="goToDashboard()">&larr; Back to dashboard</button>
+          </div>
+          <div class="artist-page-shell">
+            <div class="artist-page-hero">
+              <img id="artist-page-avatar" class="artist-page-hero-art" src="" alt="" style="display:none">
+              <div class="artist-page-hero-main">
+                <div class="artist-page-kicker" id="artist-page-kicker">Artist relationship</div>
+                <div class="artist-page-title" id="artist-page-name">Artist</div>
+                <div class="artist-page-sub" id="artist-page-subtitle">Relationship, catalog progress, and the easiest path into what you have not heard yet.</div>
+                <div class="artist-page-hero-bio" id="artist-page-hero-bio" style="display:none"></div>
+                <div class="artist-page-hero-tags" id="artist-page-hero-tags" style="display:none"></div>
+                <div class="artist-page-hero-meta" id="artist-page-hero-meta" style="display:none"></div>
+              </div>
+              <div class="artist-page-hero-side">
+                <div class="artist-page-coverage" id="artist-page-coverage"></div>
+                <div class="artist-page-hero-stats" id="artist-page-hero-stats"></div>
+                <div class="artist-page-actions">
+                  <button class="research-open-btn" type="button" id="artist-page-research-btn">Add to Research</button>
+                </div>
+              </div>
+            </div>
+            <div class="artist-page-body" id="artist-page-body">
+              <div class="spinner-wrap"><span class="spinner"></span>Loading artist</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Quick stat panels -->
+        <div class="qs-grid" id="qs-grid">
+          <div class="qs-card"><span class="qs-val" id="qs-heard">-</span><span class="qs-lbl">Heard today</span></div>
+          <div class="qs-card"><span class="qs-val" id="qs-liked">-</span><span class="qs-lbl">Liked today</span></div>
+          <div class="qs-card"><span class="qs-val" id="qs-removed">-</span><span class="qs-lbl">Removed today</span></div>
+          <div class="qs-card"><span class="qs-val" id="qs-playlist">-</span><span class="qs-lbl">In current playlist</span></div>
+          <div class="qs-card"><span class="qs-val" id="qs-spqueue">-</span><span class="qs-lbl">Spotify queue</span></div>
+          <div class="qs-card"><span class="qs-val" id="qs-session">-</span><span class="qs-lbl">Session</span></div>
+          <div class="qs-card"><span class="qs-val" id="qs-scrobbles">-</span><span class="qs-lbl">Scrobbles today</span></div>
+        </div>
+        <!-- keep compat IDs -->
+        <div style="display:none" id="stats-strip"></div>
+
+        <div class="dashboard-stack">
+          <div class="dashboard-story-grid">
+            <div class="dashboard-intel-card hero-card" id="dashboard-momentum-card">
+              <div class="spinner-wrap"><span class="spinner"></span>Loading discovery pulse</div>
+            </div>
+            <div class="dashboard-intel-card" id="dashboard-breadth-card">
+              <div class="spinner-wrap"><span class="spinner"></span>Loading listening breadth</div>
+            </div>
+            <div class="dashboard-intel-card" id="dashboard-current-lane-card">
+              <div class="spinner-wrap"><span class="spinner"></span>Loading current lane</div>
+            </div>
+            <div class="dashboard-intel-card" id="dashboard-clock-card">
+              <div class="spinner-wrap"><span class="spinner"></span>Loading listening rhythm</div>
+            </div>
+            <div class="dashboard-intel-card" id="dashboard-overview-card">
+              <div class="spinner-wrap"><span class="spinner"></span>Loading discovery analytics</div>
+            </div>
+            <div class="dashboard-intel-card" id="dashboard-taste-card">
+              <div class="spinner-wrap"><span class="spinner"></span>Loading taste profile</div>
+            </div>
+            <div class="dashboard-intel-card" id="dashboard-weekly-card">
+              <div class="spinner-wrap"><span class="spinner"></span>Loading Last.fm week</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- hidden compat IDs for JS -->
+        <div style="display:none" id="stats-card"></div>
+        <div style="display:none" id="removed-list"></div>
+        <div style="display:none" id="analytics-timeline-card"></div>
+        <div style="display:none" id="settings-card"></div>
+        <div style="display:none" id="settings-toggle"></div>
+        <div style="display:none" id="analytics-overview-card"></div>
+        <div style="display:none" id="analytics-genre-card"></div>
+        <div style="display:none" id="weekly-card"><div class="empty">-</div></div>
+
+        <div class="footer" style="margin-top:24px">Last poll: <span id="last-poll">-</span></div>
+      </main>
+    </div>
+
+
+  </div><!-- /app-section -->
+  </div><!-- /page-wrap -->
+</div><!-- /app-main -->
+
+<div class="workspace-backdrop" id="workspace-backdrop" onclick="closeWorkspace()"></div>
+<div class="workspace-shell" id="workspace-shell" role="dialog" aria-label="Exploration workspace" aria-modal="true">
+  <button class="workspace-drawer-tab" type="button" onclick="toggleWorkspaceDrawer()" aria-label="Toggle workspace drawer">
+    <span aria-hidden="true">&#8249;</span>
+  </button>
+  <aside class="workspace-rail">
+    <div class="workspace-rail-mark">Explore</div>
+    <button class="workspace-tab active" id="workspace-tab-research" onclick="switchWorkspaceTab('research')">
+      <span>Research</span>
+      <span class="workspace-tab-badge" id="rq-active-badge">0</span>
+    </button>
+    <button class="workspace-tab" id="workspace-tab-favorites" onclick="switchWorkspaceTab('favorites')">
+      <span>Favorites</span>
+    </button>
+    <div class="workspace-rail-note">One focused surface for active threads, release follow-up, and saved artist work.</div>
+  </aside>
+  <div class="workspace-main">
+    <div class="workspace-header">
+      <div class="workspace-header-copy">
+        <div class="workspace-kicker" id="workspace-kicker">Research queue</div>
+        <div class="workspace-title-row">
+          <img class="workspace-avatar" id="artist-panel-avatar" src="" alt="" style="display:none">
+          <div class="workspace-title-stack">
+            <div class="workspace-title" id="artist-panel-name">Research</div>
+            <div class="workspace-subtitle" id="workspace-subtitle">Threads to pull, promote, or revisit later.</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="workspace-body">
+      <section class="workspace-pane active" id="workspace-pane-research">
+        <div class="workspace-pane-head">
+          <div class="workspace-pane-title">Research Queue</div>
+          <div class="workspace-pane-sub">Capture intrigue without polluting likes or playlists.</div>
+        </div>
+        <div class="research-drawer-tabs">
+          <button class="research-tab active" data-status="active" onclick="switchResearchTab(this,'active')">Active <span class="research-count-badge" id="rc-active">0</span></button>
+          <button class="research-tab" data-status="promoted" onclick="switchResearchTab(this,'promoted')">Promoted <span class="research-count-badge" id="rc-promoted">0</span></button>
+          <button class="research-tab" data-status="archived" onclick="switchResearchTab(this,'archived')">Archived <span class="research-count-badge" id="rc-archived">0</span></button>
+        </div>
+        <div class="research-list" id="research-list"></div>
+      </section>
+      <section class="workspace-pane" id="workspace-pane-favorites">
+        <div class="workspace-pane-head">
+          <div class="workspace-pane-title">Favorite artists</div>
+          <div class="workspace-pane-sub">Automation-backed, easy to prune, and safe to opt out of.</div>
+        </div>
+        <div class="favorites-pane-grid">
+          <div class="card" id="favorites-summary-card"><div class="empty">Loading favorites...</div></div>
+          <div class="card" id="favorites-release-pane-card"><div class="empty">Loading release feed...</div></div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- Research Modal -->
+<div class="research-modal-backdrop" id="research-modal-backdrop" onclick="closeResearchModal()">
+  <div class="research-modal" onclick="event.stopPropagation()">
+    <button class="research-drawer-tab" type="button" onclick="closeResearchModal()" aria-label="Close research drawer">
+      <span class="research-drawer-caret">&#8250;</span>
+    </button>
+    <h3>Add to Research</h3>
+    <div class="research-modal-entity" id="research-modal-entity"></div>
+    <label>Why is this interesting?</label>
+    <div class="research-modal-tags" id="research-modal-tags"></div>
+    <label>Note <span style="font-size:10px;opacity:.5">(optional)</span></label>
+    <textarea class="research-modal-note" id="research-modal-note" placeholder="What caught your attention..."></textarea>
+    <div class="research-modal-footer">
+      <button class="research-modal-cancel" onclick="closeResearchModal()">Cancel</button>
+      <button class="research-modal-submit" onclick="submitResearch()">Add to Queue</button>
+    </div>
+  </div>
+</div>
+
+<div class="lyrics-float hidden" id="lyrics-float">
+  <div class="lyrics-float-header" id="lyrics-float-header">
+    <div>
+      <div class="dashboard-eyebrow">Live lyrics</div>
+      <div class="lyrics-float-title">Movable lyric window</div>
+    </div>
+    <div class="lyrics-float-actions">
+      <button class="dashboard-link-btn" type="button" onclick="toggleLyricsFloat(false)">Hide</button>
+    </div>
+  </div>
+  <div class="lyrics-controls">
+    <label>Lyrics offset</label>
+    <button id="lyr-offset-down" class="lyr-step" title="Earlier">-</button>
+    <input type="range" id="lyr-offset" min="-10" max="10" step="0.1" value="0">
+    <button id="lyr-offset-up" class="lyr-step" title="Later">+</button>
+    <span id="lyr-offset-val" class="lyr-offset-val">+0.0s</span>
+    <button id="lyr-offset-reset" class="lyr-reset" title="Reset">reset</button>
+  </div>
+  <div class="card" id="lyrics-card-float"><div class="empty">-</div></div>
+</div>
+
+
+<button id="dev-error-badge" onclick="openDevErrors()" title="App errors — click to view"></button>
+<div id="dev-error-modal-backdrop" onclick="closeDevErrors()"></div>
+<div id="dev-error-modal">
+  <div class="dev-err-header">
+    <span class="dev-err-title">&#9888; App Error Log</span>
+    <div class="dev-err-actions">
+      <button class="dev-err-btn" onclick="copyDevErrors()">Copy all</button>
+      <button class="dev-err-btn" onclick="closeDevErrors()">Close</button>
+    </div>
+  </div>
+  <div id="dev-error-list"></div>
+</div>
+
+<script>window.APP_CONFIG = { pollIntervalMs: {{ (poll_interval * 1000) | int }} };</script>
+<script src="{{ asset_url('classic/app.js') }}"></script>
+
+<!-- Settings modal -->
+<div class="settings-modal-backdrop" id="settings-modal-backdrop" onclick="closeSettings()"></div>
+<div class="settings-modal" id="settings-modal">
+  <div class="settings-modal-header">
+    <span class="settings-modal-title">Settings</span>
+    <button class="settings-modal-close" onclick="closeSettings()">&times;</button>
+  </div>
+  <div class="settings-modal-body">
+    <div class="settings-note">Edits write to <code>.env</code>. Most need a restart to apply.</div>
+    <div class="settings-section">
+      <div class="settings-section-title">Session Controls</div>
+      <div class="settings-section-note">Runtime controls for this session and your current workspace.</div>
+      <div class="settings-runtime-grid">
+        <div class="setting-row">
+          <label for="threshold">Listening threshold</label>
+          <div class="settings-threshold-row">
+            <input type="range" id="threshold" min="5" max="180" step="5" value="30"
+                   aria-label="Threshold in seconds" aria-valuemin="5" aria-valuemax="180">
+            <span class="thr-val"><span id="threshold-val">30</span>s</span>
+          </div>
+          <div class="setting-hint">Track must play this long before it can be removed from the discover playlist.</div>
+        </div>
+        <div class="setting-row">
+          <label>Live polling</label>
+          <div class="settings-action-row">
+            <button type="button" class="poll-toggle" id="poll-toggle-btn" onclick="togglePolling()">Pause</button>
+          </div>
+          <div class="setting-hint">Pause or resume the live Spotify poll loop without leaving the app.</div>
+        </div>
+        <div class="setting-row">
+          <label>Research queue</label>
+          <div class="settings-action-row">
+            <button type="button" class="poll-toggle" onclick="closeSettings();openWorkspace('research')">Open research queue</button>
+          </div>
+          <div class="setting-hint">Jump straight into your saved intrigue and revisit threads.</div>
+        </div>
+        <div class="setting-row">
+          <label>Recently played cleanup</label>
+          <div class="settings-action-row">
+            <button type="button" class="poll-toggle" id="btn-catch-up">Catch up on recently played</button>
+          </div>
+          <div class="setting-hint">Scan your last 50 Spotify plays and clear anything that already escaped the backlog.</div>
+        </div>
+      </div>
+    </div>
+    <div id="settings-form"><div class="spinner-wrap"><span class="spinner"></span>Loading settings</div></div>
+    <div class="btn-row">
+      <button id="btn-save-settings" class="settings-save">Save changes</button>
+    </div>
+    <div id="settings-status" class="settings-status"></div>
+    <!-- Spotify history import -->
+    <div class="settings-section" id="spotify-import-section" style="margin-top:18px">
+      <div class="settings-section-title">Spotify History Import</div>
+      <div class="settings-section-note">Imports your recently played tracks, top artists (short/medium/long-term), top tracks, and full liked-songs library. Deduplicates against Last.fm scrobbles - safe to run alongside or instead of Last.fm.</div>
+      <div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <button id="btn-spotify-import" onclick="startSpotifyImport()" style="background:#1db954;color:#000;border:none;border-radius:6px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer">Import from Spotify</button>
+        <span id="spotify-import-status" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div id="spotify-import-detail" style="font-size:11px;color:var(--muted);margin-top:6px;display:none"></div>
+    </div>
+    <!-- Last.fm import -->
+    <div class="settings-section" id="lfm-import-section" style="margin-top:18px">
+      <div class="settings-section-title">Last.fm History Import</div>
+      <div class="settings-section-note">Imports your full scrobble history as listen events. Safe to re-run - resumes from last imported timestamp. No Spotify IDs are resolved (events carry artist/track name only).</div>
+      <div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <button id="btn-lfm-import" onclick="startLfmImport(false)" style="background:var(--accent);color:#000;border:none;border-radius:6px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer">Import scrobbles</button>
+        <button id="btn-lfm-reset" onclick="startLfmImport(true)" title="Clear import cursor and re-fetch full history (dupes are skipped)" style="background:rgba(255,255,255,0.07);color:var(--muted);border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer">Full reimport</button>
+        <span id="lfm-import-status" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div id="lfm-import-bar-wrap" style="display:none;margin-top:8px">
+        <div style="height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden">
+          <div id="lfm-import-bar" style="height:100%;width:0%;background:var(--accent);border-radius:2px;transition:width 0.4s"></div>
+        </div>
+        <div id="lfm-import-detail" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

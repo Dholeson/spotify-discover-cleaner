@@ -1,0 +1,33 @@
+# --- Secrets: never commit ---
+.env
+.spotify_cache
+.cache*
+
+# --- Personal data (listening history, app state, backups) ---
+music_explorer.db
+music_explorer.db-*
+music_explorer.db.bak-*
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.config.json
+.config.json.*
+_backup*/
+research/
+.demo-data/
+
+# --- Runtime / tooling ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+*.tmp
+app.py.tmp
+.playwright-mcp/
+.claude/
+node_modules/
+dist/
+.DS_Store
+Thumbs.db
