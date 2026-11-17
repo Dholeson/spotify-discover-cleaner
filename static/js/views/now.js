@@ -704,6 +704,7 @@ function lyricsState() {
   if (!s) return { kind: 'loading' };
   if (!t) return { kind: 'none' };
   if (!L || typeof L !== 'object') return { kind: V.waitedOut.lyrics === t.id ? 'unavailable' : 'loading' };
+  if (L.demo) return { kind: 'demo' };   // the static web demo has no lyrics service
   if (!L.found) return { kind: L.error ? 'error' : 'missing' };
   if (L.synced && Array.isArray(L.lines) && L.lines.length) return { kind: 'synced', lines: L.lines, source: L.source };
   if (L.plain) return { kind: 'plain', text: String(L.plain), source: L.source };
@@ -738,6 +739,9 @@ function lyricsMarkup(ls) {
       break;
     case 'missing':
       body = note('music', 'No lyrics found.', "LRCLIB doesn't have lyrics for this track — common for instrumentals and very new releases.");
+      break;
+    case 'demo':
+      body = note('music', 'Lyrics aren’t part of the demo.', 'They come from LRCLIB, which the demo doesn’t call. In the app, synced lyrics scroll along with the song here.');
       break;
     case 'synced': {
       chip = html`<span class="chip lyr-chip">Synced</span>`;
@@ -1023,6 +1027,9 @@ function artistMarkup() {
           })}
         </ul>
       </div>` : ''}`;
+    if (info.demo && !bio && !tags.length && !related.length) {
+      details = html`<p class="art-note">${icon('info')}Bio, tags and similar artists come from Last.fm and aren't part of the demo.</p>`;
+    }
   } else if (V.waitedOut.artist === name) {
     details = html`<p class="art-note">${icon('info')}Bio, tags and similar artists from Last.fm aren't available right now.</p>`;
   } else {

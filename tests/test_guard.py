@@ -781,6 +781,36 @@ class LastfmClientTest(unittest.TestCase):
         os.environ.pop("LASTFM_API_KEY", None)
         self.assertIs(a.lastfm_call("artist.getInfo", artist="X"), a._LFM_FAIL)
 
+    def test_every_request_has_a_bounded_timeout(self):
+        a = self.app
+        with mock.patch.object(a.requests, "get", side_effect=ConnectionError("offline")) as get:
+            a.lastfm_call("artist.getInfo", artist="X")
+        timeout = get.call_args.kwargs.get("timeout")
+        parts = timeout if isinstance(timeout, tuple) else (timeout,)
+        self.assertTrue(parts and all(isinstance(t, (int, float)) and 0 < t <= 15 for t in parts), timeout)
+
+    def test_unreachable_lastfm_fails_fast_after_one_attempt(self):
+        # An artist page makes several Last.fm calls: when Last.fm can't be reached, only the first
+        # may wait for the network; the rest must fail at once (no stacked timeouts).
+        a = self.app
+        import requests as _requests
+        with mock.patch.object(a.requests, "get", side_effect=_requests.exceptions.ConnectTimeout("timed out")) as get:
+            self.assertEqual(a.lastfm_similar_artists("Band A"), [])
+            self.assertEqual(a.lastfm_artist_top_tags("Band B"), [])
+            self.assertIsNone(a.lastfm_artist_info("Band C"))
+        self.assertEqual(get.call_count, 1)
+        a.lastfm_reset_caches()
+        ok = {"similarartists": {"artist": [{"name": "Sister Band", "match": "0.9", "url": "u"}]}}
+
+        class Resp:
+            status_code = 200
+
+            def json(self):
+                return ok
+
+        with mock.patch.object(a.requests, "get", return_value=Resp()):
+            self.assertEqual(a.lastfm_similar_artists("Band A")[0]["name"], "Sister Band")
+
 
 if __name__ == "__main__":
     unittest.main()

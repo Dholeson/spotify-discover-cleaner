@@ -176,6 +176,50 @@ allowlisted tables and payload fields only, playlist ids replaced, notes dropped
 and byte-reproducible; it refuses to write if a source playlist id, an email address or a local
 path survived.
 
+## The web demo
+
+`python dev/build_web_demo.py` builds `dist/web-demo/` (ignored by git): the real interface plus
+JSON fixtures, for a static host. Nothing runs on a server; it works under any base path (all URLs
+are relative, routing is by hash) and under a strict Content-Security-Policy (no inline script;
+the only outside requests are album covers from `i.scdn.co`, which degrade to placeholders when
+blocked).
+
+The build, in one process:
+
+1. Freezes the clock (`time.time`, `datetime.now`, `date.today`) at DEMO_NOW, a few minutes
+   after the snapshot's newest play, so "today" and "this week" are the snapshot's. Dates are not
+   moved forward (unlike `--demo`): the web demo shows the real dates. Local days follow
+   America/Denver, the snapshot's time zone.
+2. Seeds a temporary data folder from `demo/snapshot/`, imports `app.py` in demo mode
+   (FakeSpotify, Spotify blocked), builds the plays ledger and the backlog index synchronously and
+   crawls the API with Flask's test client: reports for every period the < > buttons reach,
+   year in music for every year, the artist index and every artist's page, recent plays, library,
+   settings, and the real responses of the live routes as templates.
+3. Drops what FakeSpotify makes up (placeholder ids, follower counts, 3:20 durations, added and
+   liked dates, a release radar), writes gzipped fixtures with a manifest, renders
+   `templates/index.html` with relative asset URLs and the demo's config, and checks the result
+   (size, file count, no local paths). Same inputs, same bytes.
+
+In the browser, `static/js/demo/` takes over before the app starts:
+
+- `clock.js` (a classic script, first on the page) makes `Date` run from DEMO_NOW.
+- `main.js` installs `mock-api.js` as the transport of `core/api.js` (`setTransport`), shows the
+  banner (`banner.js`), then imports the app's own `main.js` unchanged.
+- `mock-api.js` answers every route from the fixtures (`fixtures.js` inflates them with
+  `DecompressionStream`), filtering, sorting and paging like the server. Writes that need a real
+  account answer `409 demo_readonly`, which the interface shows as a toast.
+- `sim.js` is the simulated Spotify behind `/api/status` and the playback and backlog routes:
+  tracks play 45 s, a backlog track clears after the threshold, and Keep, Undo, Like, Clear now,
+  the Auto-clear switch and the threshold follow the clearing engine's rules. State lives in
+  `sessionStorage` (per tab); "Reset demo" starts over.
+
+The views stay the same; where the demo lacks something they show a note instead of a dead
+control (`webDemo` in the page config): lyrics, discographies, Last.fm details for most artists,
+settings that need an account, the classic view and the mini player.
+`tests/test_web_demo.py` checks the build's helpers, that the mock answers every API path the
+interface uses, and fixture coverage on a quick `--sample` build (and on `dist/web-demo` when it
+exists).
+
 ## Testing
 
 ```

@@ -495,6 +495,9 @@ def build_oauth_manager():
 LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY")
 LASTFM_USERNAME = os.environ.get("LASTFM_USERNAME")
 LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
+# (connect, read) seconds for every Last.fm request: an unreachable Last.fm must never hold up a
+# page (an artist page makes several Last.fm calls; see _lfm_fetch's breaker for the rest).
+LASTFM_TIMEOUT_S = (3.05, 8)
 
 
 def lastfm_api_key():
@@ -2359,11 +2362,12 @@ def lastfm_call(method, **params):
         return _LFM_FAIL
     p = {"method": method, "api_key": api_key, "format": "json", **params}
     try:
-        r = requests.get(LASTFM_BASE, params=p, timeout=8,
+        r = requests.get(LASTFM_BASE, params=p, timeout=LASTFM_TIMEOUT_S,
                          headers={"User-Agent": LRCLIB_UA})
     except Exception as e:
-        _lfm_last_error.update(message=f"{method}: {e}", code=None, ts=time.time())
+        _lfm_last_error.update(message=f"{method}: {e}", code=None, network=True, ts=time.time())
         return _LFM_FAIL
+    _lfm_last_error["network"] = False
     try:
         data = r.json()
     except ValueError:
@@ -2397,6 +2401,11 @@ def _lfm_fetch(method, **params):
             _lfm_breaker["failures"] += 1
             if _lfm_last_error.get("code") == 29:  # Last.fm "rate limit exceeded"
                 _lfm_breaker["open_until"] = now + 300
+            elif _lfm_last_error.get("network") and float(_lfm_last_error.get("ts") or 0) >= now:
+                # Unreachable (DNS, connect or read timeout): one wait is enough, don't stack
+                # one per Last.fm call of the page.
+                _lfm_breaker["open_until"] = now + 60
+                _lfm_breaker["failures"] = 0
             elif _lfm_breaker["failures"] >= 5:
                 _lfm_breaker["open_until"] = now + 60
                 _lfm_breaker["failures"] = 0

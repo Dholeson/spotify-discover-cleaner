@@ -409,6 +409,9 @@ function renderNotice() {
       actions: html`<button type="button" class="btn btn-secondary btn-sm" data-action="ar-unhide">Show in stats again</button>`,
     }));
   }
+  // The static web demo says what an artist page leaves out there (see static/js/demo/).
+  const demoNote = st?.demo_note || S.info?.demo_note;
+  if (demoNote) parts.push(notice({ tone: 'quiet', icon: 'info', className: 'ar-banner', body: demoNote }));
   if (S.infoErr) {
     const e = S.infoErr;
     const msg = e.status === 401
@@ -493,6 +496,8 @@ function renderHistory() {
     const unknownEverywhere = !S.infoLoading && !pick && !(S.info?.bio || S.info?.bio_full || (S.info?.related || []).length);
     const body = pick
       ? 'Nothing by them is in your listening history. Start with their most popular tracks below: anything you play shows up on this page.'
+      : unknownEverywhere && S.info?.demo
+        ? 'Nothing by them is in this listening history. Check the spelling, or search for them.'
       : unknownEverywhere
         ? 'Nothing by them is in your listening history, and Spotify and Last.fm had nothing under this exact name either. Check the spelling, or search for them.'
         : 'Nothing by them is in your listening history yet. Anything you play shows up on this page.';
@@ -746,6 +751,8 @@ function renderDisco() {
     if (e?.isRateLimited) {
       const when = e.retryAfter ? new Date(Date.now() + e.retryAfter * 1000).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
       body = errorState(e, { title: 'Spotify is cooling down', body: `Their releases can load again ${when ? `around ${when}` : 'in a moment'}${S.discoRetries ? ' — this page will retry by itself' : ''}. Everything else on this page still works.`, retry: () => loadDisco(), compact: true });
+    } else if (e?.code === 'demo_unavailable') {
+      body = emptyState({ title: 'Not part of the demo', body: e.message, icon: 'disc', compact: true });
     } else if (e?.status === 404 || e?.code === 'artist_not_found') {
       body = emptyState({ title: `${name} wasn't found on Spotify`, body: 'Without a Spotify match there is no catalog to show. Everything else on this page still works.', icon: 'search', compact: true });
     } else if (e?.status === 401) {

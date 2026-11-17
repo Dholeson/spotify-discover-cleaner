@@ -245,6 +245,20 @@ tests/               unit and integration tests (stdlib unittest)
 The tests never touch your data or the network: the integration tests run on a temporary copy of
 the app with a fake `.env` and every outgoing request blocked.
 
+The live demo on dhole.dev is a static build of the interface that runs entirely in the
+browser:
+
+```
+python dev/build_web_demo.py          # -> dist/web-demo/ (about 2 minutes, ~4 MB, ~500 files)
+```
+
+It boots the app in-process on the bundled snapshot with the clock frozen at the snapshot's
+last evening, crawls the API into gzipped JSON fixtures, and copies the interface with
+`static/js/demo/` (an in-browser mock of the API and a simulated player). Serve the folder from
+any static host under any path. Set `LASTFM_API_KEY` in the environment to include Last.fm bios
+and similar artists for the top artists (fetched once and cached). Details:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#the-web-demo).
+
 `python app.py --demo` is also the development sandbox: the real poll loop, clearing engine and
 interface against the simulated Spotify in `src/devtools/fake_spotify.py`, with its data in
 `.demo-data/`. Environment knobs: `FAKE_TRACK_SECONDS` (seconds each simulated track plays,

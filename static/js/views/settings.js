@@ -4,7 +4,7 @@
 // follows the scroll position. Each section lives in components/settings-<name>.js and exposes
 // {id, label, icon, title, desc, mount(el), onStatus?(status, changed), destroy()}; this file
 // lays them out, deep-links to them, forwards status updates and keeps relative times fresh.
-import { html, mount, icon, pageHeader, sectionHeader, reportError } from '../core/ui.js';
+import { html, mount, icon, pageHeader, sectionHeader, reportError, notice } from '../core/ui.js';
 import { refreshRelTimes } from '../components/settings-ui.js';
 import { createBacklogSection } from '../components/settings-backlog.js';
 import { createAccountsSection } from '../components/settings-accounts.js';
@@ -85,6 +85,38 @@ function settleOn(id, section) {
   if (id === 'connection' && section === 'diagnostics') sections.find((s) => s.id === 'connection')?.openDiagnostics?.();
 }
 
+// The static web demo (dist/web-demo) has no Spotify app, Last.fm account, .env or local server
+// behind it: Settings is shown read-only there, except auto-clear and the threshold, which the
+// simulated player honours. Controls that would need the real thing are switched off in place.
+const WEB_DEMO = !!window.APP_CONFIG?.webDemo;
+const DEMO_OFF = [
+  'a[href="/login"]', 'a[href="/classic"]', '[data-st="mini"]', '[data-st="pick"]', '[data-st="sync"]',
+  '[data-st="spotify-import"]', '[data-st="clear-guard"]', 'a[href^="https://open.spotify.com/playlist/"]',
+  '[data-body="accounts"] input', '[data-body="accounts"] button[type="submit"]', '[data-body="accounts"] [data-st="reveal"]',
+  '[data-body="advanced"] input', '[data-body="advanced"] select', '[data-body="advanced"] textarea',
+  '[data-body="advanced"] button[type="submit"]', '[data-body="advanced"] [data-st="discard"]',
+].join(', ');
+
+function demoLock(scope) {
+  // "Set up Last.fm" prompts: the demo's history did come from Last.fm (see the note on top).
+  scope.querySelectorAll('[data-body="history"] .notice').forEach((n) => {
+    if (n.querySelector('a[href="#/settings?section=accounts"]') && n.style.display !== 'none') n.style.display = 'none';
+  });
+  scope.querySelectorAll(DEMO_OFF).forEach((n) => {
+    if (n.dataset.demoOff) return;
+    n.dataset.demoOff = '1';
+    n.title = 'Not available in the demo';
+    if (n.tagName === 'A') {
+      n.removeAttribute('href');
+      n.setAttribute('aria-disabled', 'true');
+      n.classList.add('is-disabled');
+      n.tabIndex = -1;
+    } else {
+      n.disabled = true;
+    }
+  });
+}
+
 function setDirty(id, on) {
   const dot = root?.querySelector(`.st-nav-link[data-section="${id}"] .st-nav-dot`);
   if (dot) dot.hidden = !on;
@@ -108,6 +140,8 @@ export default {
     ];
     mount(root, html`
       ${pageHeader({ title: 'Settings', desc: 'Your backlog playlist and how clearing works, your connected accounts, and your listening data.' })}
+      ${WEB_DEMO ? notice({ tone: 'info', icon: 'info', className: 'st-demo-note', title: 'Settings are read-only in the demo',
+        body: 'The listening history was imported from Last.fm before it was frozen; the demo itself isn’t connected to Spotify or Last.fm, so sign-in, account details, syncing, imports and the playlist choice are switched off. Auto-clear and the clearing threshold work, here and on Now.' }) : ''}
       <div class="st-layout">
         <nav class="st-nav" aria-label="Settings sections">
           <ul class="st-nav-list" role="list">
@@ -126,6 +160,12 @@ export default {
 
     for (const s of sections) {
       try { s.mount(root.querySelector(`[data-body="${s.id}"]`)); } catch (err) { reportError(err); }
+    }
+    if (WEB_DEMO) {
+      demoLock(root);
+      const mo = new MutationObserver(() => demoLock(root));
+      mo.observe(root, { childList: true, subtree: true });
+      cleanup.push(() => mo.disconnect());
     }
 
     // Sub-nav: plain links (middle-click and copy-link work); a normal click scrolls smoothly and

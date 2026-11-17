@@ -94,6 +94,7 @@ export function createRecentTab({ ctx }) {
       const items = Array.isArray(r?.items) ? r.items : [];
       st.items = reset ? items : dedupe([...st.items, ...items]);
       st.next = r?.next_before_ms ?? null;
+      st.demoEnd = r?.demo_end || null;   // the static web demo carries only the latest plays
       st.loaded = true;
     } catch (err) {
       if (isAbort(err) || mySeq !== seq) return;
@@ -205,7 +206,7 @@ export function createRecentTab({ ctx }) {
       let text = '';
       if (st.loaded && !st.error && n) {
         const oldest = st.items[n - 1];
-        text = st.next
+        text = st.next || st.demoEnd
           ? `${fmt.plural(n, 'play')} shown · back to ${fmt.date(oldest.ts_ms, { year: 'auto' })}`
           : `All ${fmt.plural(n, 'play')}${filtered() ? ' that match' : ''}`;
       }
@@ -223,7 +224,7 @@ export function createRecentTab({ ctx }) {
       btn.classList.toggle('is-busy', st.loading);
       btn.setAttribute('aria-busy', st.loading ? 'true' : 'false');
     } else if (st.items.length && st.loaded && !st.next) {
-      mount(more, html`<p class="lib-end muted small">${filtered() ? "That's every matching play." : 'That’s the start of your listening history.'}</p>`);
+      mount(more, html`<p class="lib-end muted small">${st.demoEnd || (filtered() ? "That's every matching play." : 'That’s the start of your listening history.')}</p>`);
     } else {
       mount(more, '');
     }

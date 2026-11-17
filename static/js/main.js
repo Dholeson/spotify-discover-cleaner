@@ -211,13 +211,19 @@ function renderDemoBadge(on) {
   let badge = document.getElementById('demo-badge');
   if (!on) { if (badge) badge.hidden = true; return; }
   if (!badge && right) {
+    // The static web demo (dist/web-demo) runs in the browser: "Live demo", and the badge
+    // re-opens its banner (static/js/demo/banner.js).
+    const web = !!window.APP_CONFIG?.webDemo;
     badge = document.createElement('span');
     badge.id = 'demo-badge';
     badge.className = 'demo-badge';
-    badge.dataset.tip = 'Nothing here talks to Spotify: playback is simulated over the author’s real listening history. Changes stay on this computer.';
+    badge.dataset.tip = web
+      ? 'Real listening history, frozen in time; Spotify is simulated. Click for details.'
+      : 'Nothing here talks to Spotify: playback is simulated over the author’s real listening history. Changes stay on this computer.';
     badge.dataset.tipPlacement = 'bottom';
     badge.tabIndex = 0;
-    mount(badge, html`${icon('wifiOff')}<span>Offline demo<span class="demo-badge-sub"> · simulated Spotify</span></span>`);
+    if (web) badge.setAttribute('role', 'button');
+    mount(badge, html`${icon('wifiOff')}<span>${web ? 'Live demo' : 'Offline demo'}<span class="demo-badge-sub"> · simulated Spotify</span></span>`);
     right.prepend(badge);
   }
   if (badge) badge.hidden = false;

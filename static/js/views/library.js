@@ -4,7 +4,7 @@
 // Tab switches and filter changes arrive through update() (same view), so tab state and the
 // module-level caches survive switching back and forth.
 import { api } from '../core/api.js';
-import { html, mount, pageHeader, fmt, reportError } from '../core/ui.js';
+import { html, mount, pageHeader, fmt, reportError, notice } from '../core/ui.js';
 import { createRecentTab } from './library-recent.js';
 import { createBacklogTab } from './library-backlog.js';
 import { createLikedTab } from './library-liked.js';
@@ -18,6 +18,12 @@ const TABS = [
   { id: 'favorites', label: 'Favorites', create: createFavoritesTab },
   { id: 'watchlist', label: 'Watchlist', create: createWatchlistTab },
 ];
+// The static web demo (static/js/demo/) says where a tab shows simulated data.
+const WEB_DEMO = window.APP_CONFIG?.webDemo || null;
+const DEMO_NOTES = WEB_DEMO ? {
+  backlog: `The demo’s backlog is a simulated playlist made of the tracks the app saw play. When each one was added and how long it runs aren’t known, so no dates are shown and every track plays ${WEB_DEMO.simSeconds || 45} s.`,
+  liked: 'Liked Songs are simulated in the demo: a sample of tracks from the backlog, plus anything you like here. When the sample was liked isn’t known.',
+} : {};
 let root = null;
 let panel = null;
 let ctxRef = null;
@@ -33,6 +39,7 @@ function renderShell(selected) {
     <nav class="tabs lib-tabs" aria-label="Library sections">
       ${TABS.map((t) => html`<a class="tab" href="#/library/${t.id}" data-tab="${t.id}" ${t.id === selected ? html`aria-current="page"` : ''}>${t.label}<span class="tab-count" data-count="${t.id}" hidden></span></a>`)}
     </nav>
+    ${WEB_DEMO ? html`<div class="lib-demo-note" data-demo-note></div>` : ''}
     <div class="lib-panel" data-panel></div>`);
   panel = root.querySelector('[data-panel]');
   Object.keys(counts).forEach((id) => paintCount(id));
@@ -83,6 +90,8 @@ function select(params) {
     try { active.ctrl.unmount?.(); } catch (err) { reportError(err); }
   }
   markSelected(tab.id);
+  const note = root.querySelector('[data-demo-note]');
+  if (note) mount(note, DEMO_NOTES[tab.id] ? notice({ tone: 'quiet', icon: 'info', compact: true, body: DEMO_NOTES[tab.id] }) : '');
   panel.replaceChildren();
   panel.className = `lib-panel lib-panel-${tab.id}`;
   const ctrl = tab.create({ ctx: ctxRef, setCount });

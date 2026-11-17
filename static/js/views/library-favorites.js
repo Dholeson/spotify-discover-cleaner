@@ -161,7 +161,7 @@ export function createFavoritesTab() {
       bodyHtml = emptyState({
         icon: d.release_error ? 'hourglass' : 'disc',
         compact: true,
-        title: d.release_error ? 'New releases are on their way' : 'No releases found yet',
+        title: d.release_demo ? 'Not part of the demo' : d.release_error ? 'New releases are on their way' : 'No releases found yet',
         body: d.release_error || 'Nothing new from your favorites turned up. Check back later.',
       });
     } else if (!filtered.length) {

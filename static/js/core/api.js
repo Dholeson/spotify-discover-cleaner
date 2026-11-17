@@ -11,6 +11,14 @@
 
 const DEFAULT_TIMEOUT_MS = 15000;
 
+// The static web demo (static/js/demo/, dist/web-demo) answers every request in the browser:
+// it installs a fetch-compatible transport here before the app starts. Unset everywhere else.
+let transport = null;
+/** Send all requests through fn(url, init) → Promise<Response> instead of the network. */
+export function setTransport(fn) {
+  transport = typeof fn === 'function' ? fn : null;
+}
+
 const FRIENDLY = {
   400: ['bad_request', 'The request was not accepted.'],
   401: ['signed_out', 'Spotify is not connected. Sign in to continue.'],
@@ -106,7 +114,7 @@ async function request(method, path, { params, body, signal, timeoutMs = DEFAULT
   const hasBody = body !== undefined && method !== 'GET';
   let res;
   try {
-    res = await fetch(url, {
+    const init = {
       method,
       headers: { Accept: 'application/json', ...(hasBody ? { 'Content-Type': 'application/json' } : {}), ...headers },
       body: hasBody ? JSON.stringify(body ?? {}) : undefined,
@@ -114,7 +122,8 @@ async function request(method, path, { params, body, signal, timeoutMs = DEFAULT
       credentials: 'same-origin',
       cache: 'no-store',
       keepalive,
-    });
+    };
+    res = await (transport ? transport(url, init) : fetch(url, init));
   } catch (e) {
     clearTimeout(timer);
     signal?.removeEventListener?.('abort', onAbort);
