@@ -342,6 +342,33 @@ class ConcurrentClearTests(EngineCase):
         self.assertEqual(self.sp.add_calls, [])
         self.assertEqual(sum(1 for x in self.sp.tracks if x["id"] == t["id"]), 1)
 
+    def test_undo_keeps_the_original_added_date_and_details(self):
+        t = track(15)
+        before = self.index.entry(t["id"])
+        entry = self.engine.clear_tracks(self.core, self.sp, [t], "manual", "manual")[0]
+        self.assertEqual(entry["added_at"], ADDED_AT)
+        now = entry["ts_ms"] + 1000
+        self.engine.undo(self.core, self.sp, entry["seq"], now_ms=now)
+        back = self.index.entry(t["id"])
+        # the index keeps Spotify's stamp (catch-up relies on it), album and length come back
+        self.assertNotEqual(back["added_at"], ADDED_AT)
+        self.assertEqual((back["album"], back["duration_ms"]), (before["album"], before["duration_ms"]))
+        # lists show the date it was first added, for the copy Undo put back only
+        dates = self.engine.restored_dates
+        self.assertEqual(dates.display_added_at(t["id"], back["added_at"]), ADDED_AT)
+        self.assertEqual(dates.display_added_at(t["id"], "2027-01-01T00:00:00Z"), "2027-01-01T00:00:00Z")
+        self.assertEqual(dates.display_added_at(track(16)["id"], ADDED_AT), ADDED_AT)
+        from src.web.backlog_api import _entry_row
+        self.assertEqual(_entry_row(3, back, dates)["added_at"], ADDED_AT)
+
+    def test_restored_dates_survive_a_restart(self):
+        from src.services.clearing import RestoredDates
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        RestoredDates(lambda: conn).remember("t1", ADDED_AT, restored_ms=1_800_000_000_000)
+        again = RestoredDates(lambda: conn)
+        self.assertEqual(again.display_added_at("t1", "2027-01-15T08:01:00Z"), ADDED_AT)
+
     def test_undo_for_a_previous_playlist_appends(self):
         t = track(13)
         entry = self.engine.clear_tracks(self.core, self.sp, [t], "manual", "manual", playlist_id=OTHER_PID)[0]
@@ -474,7 +501,18 @@ class KeepTests(EngineCase):
         fate = self.fate(t)
         self.assertEqual((fate["state"], fate["reason"]), ("kept", "auto_clean_resumed"))
         self.assertIsNone(self.poll_decision(t))
-        self.assertFalse(self.engine.was_kept(t["id"]))  # not a listener Keep (catch-up may still offer it)
+        self.assertFalse(self.engine.was_kept(t["id"]))  # not a listener Keep...
+        self.assertTrue(self.engine.heard_while_paused(t["id"]))  # ...but Now said it stays: no catch-up
+
+    def test_play_past_the_threshold_while_paused_is_remembered(self):
+        t, short = track(34), track(35)
+        self.engine.set_auto_clean(self.core, False)
+        self.play_for(t, 24)
+        self.assertEqual(self.fate(t)["state"], "clearing_paused")
+        self.assertTrue(self.engine.heard_while_paused(t["id"]))
+        self.play_for(short, 6)                       # skipped before the threshold: not "heard"
+        self.fate(short)
+        self.assertFalse(self.engine.heard_while_paused(short["id"]))
 
     def test_reenabling_before_the_threshold_clears_normally(self):
         t = track(33)
@@ -535,22 +573,27 @@ class CatchUpTests(EngineCase):
         return {"track": t, "played_at": played_at}
 
     def test_filters(self):
-        before_add, after_add, kept, restored = track(1), track(2), track(3), track(4)
+        before_add, after_add, kept, restored, paused = track(1), track(2), track(3), track(4), track(5)
         self.sp.recent_items = [
             self.recent(after_add, "2026-09-24T10:00:00.000Z"),
             self.recent(before_add, "2026-09-10T10:00:00.000Z"),   # heard before it joined the backlog
             self.recent(kept, "2026-09-24T09:00:00.000Z"),
             self.recent(restored, "2026-09-24T08:00:00.000Z"),
+            self.recent(paused, "2026-09-24T07:00:00.000Z"),       # heard in the app while auto-clear was off
         ]
+        self.engine.set_auto_clean(self.core, False)
+        self.play_for(paused, 24)
+        self.fate(paused)
+        self.engine.set_auto_clean(self.core, True)
         self.engine.set_kept(kept["id"], True)
         entry = self.engine.clear_tracks(self.core, self.sp, [restored], "manual", "manual")[0]
         self.engine.undo(self.core, self.sp, entry["seq"])
         ids = [c["id"] for c in self.api.catch_up_candidates(self.core, self.sp, self.index, self.engine)]
         self.assertEqual(ids, [after_add["id"]])
         entries, skipped = self.api.clear_catch_up(self.core, self.sp, self.index, self.engine,
-                                                   [after_add["id"], kept["id"], restored["id"]])
+                                                   [after_add["id"], kept["id"], restored["id"], paused["id"]])
         self.assertEqual([e["track_id"] for e in entries], [after_add["id"]])
-        self.assertEqual(sorted(skipped), sorted([kept["id"], restored["id"]]))
+        self.assertEqual(sorted(skipped), sorted([kept["id"], restored["id"], paused["id"]]))
 
 
 # ---------------------------------------------------------------------------

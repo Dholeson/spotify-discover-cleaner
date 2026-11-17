@@ -402,6 +402,9 @@ class FakeSp:
     def _get(self, url, **kw):
         return {"items": self.albums[kw.get("offset", 0): kw.get("offset", 0) + kw.get("limit", 20)], "next": None}
 
+    def artist_albums(self, artist_id, include_groups=None, limit=20, offset=0, **kw):
+        return self._get(f"artists/{artist_id}/albums", include_groups=include_groups, limit=limit, offset=offset)
+
     def album(self, album_id):
         names = self.tracklists[album_id]
         return {"id": album_id, "name": album_id, "artists": [{"id": "dgd", "name": "Dance Gavin Dance"}],
@@ -534,6 +537,26 @@ class RouteTests(Base):
         unknown = self.client.get("/api/v2/artist/Nobody%20At%20All/stats")
         self.assertEqual(unknown.status_code, 200)
         self.assertFalse(unknown.get_json()["found"])
+
+    def test_top_lists_carry_local_cover_art(self):
+        conn = self.L.conn
+        conn.execute("CREATE TABLE IF NOT EXISTS tracks (id TEXT PRIMARY KEY, name TEXT, album TEXT, album_id TEXT, "
+                     "image_url TEXT, spotify_url TEXT, duration_ms INTEGER, created_at INTEGER)")
+        sp_id = conn.execute("SELECT spotify_track_id FROM plays WHERE artist_name = 'Dance Gavin Dance' "
+                             "AND spotify_track_id IS NOT NULL LIMIT 1").fetchone()
+        self.assertIsNotNone(sp_id)
+        conn.execute("INSERT INTO tracks (id, name, image_url, created_at) VALUES (?, 'x', 'https://i.scdn.co/image/c', 1)",
+                     (sp_id[0],))
+        conn.commit()
+        body = self.client.get("/api/v2/artist/Dance%20Gavin%20Dance/stats").get_json()
+        self.assertTrue(all("image" in t for t in body["top_tracks"] + body["top_albums"]))
+        with_art = [t for t in body["top_tracks"] if t["image"]]
+        self.assertTrue(with_art)
+        self.assertEqual(with_art[0]["image"], "https://i.scdn.co/image/c")
+        self.assertTrue(any(a["image"] for a in body["top_albums"]))
+        # the cached profile itself is untouched (rows are copies)
+        from src.services import artist_stats as AS
+        self.assertNotIn("image", AS.artist_profile(conn, "Dance Gavin Dance")["top_tracks"][0])
 
     def test_not_ready_is_503(self):
         empty = Ledger(with_plays=False).conn

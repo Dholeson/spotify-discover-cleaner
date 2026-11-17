@@ -387,8 +387,12 @@ function announceClears(status) {
     fresh.forEach((e) => seenSeqs.add(e.seq));
     if (seenSeqs.size > 300) { const keep = [...seenSeqs].slice(-150); seenSeqs.clear(); keep.forEach((s) => seenSeqs.add(s)); }
     // Catch-up clears come in bulk from a button press; whoever pressed it shows one summary
-    // toast, so a poll that lands mid-request must not add a toast per track.
-    fresh.filter((e) => !e.undone && e.reason !== 'catch-up').reverse().slice(-3).forEach(announceCleared);
+    // toast, so a poll that lands mid-request must not add a toast per track. Clears of the
+    // track that is playing need no toast at all: the player bar (and Now) already say
+    // "Cleared from backlog · Undo", and a toast per track covered whatever page was open.
+    const playing = status.current_track?.id || null;
+    fresh.filter((e) => !e.undone && e.reason !== 'catch-up' && !(playing && e.track_id === playing))
+      .reverse().slice(-3).forEach(announceCleared);
     return;
   }
   // Older servers: recently_removed (no seq, no undo) — announce without Undo.
@@ -550,8 +554,16 @@ export function like() {
       const auto = Array.isArray(r?.auto_liked) && r.auto_liked.length ? ` Also followed ${r.auto_liked.join(', ')}.` : '';
       // Older servers only said in the message text whether the backlog copy was removed.
       const cleared = typeof r?.removed === 'boolean' ? r.removed : wasInBacklog && /removed/i.test(String(r?.message || ''));
-      const note = cleared ? ' and cleared it from your backlog' : (r?.queued ? ' · it clears from your backlog once Spotify allows' : '');
-      toast(html`Liked <strong>${t.name}</strong>${note}${auto}`, { kind: 'success', icon: 'heartFilled', key: `track:${t.id}` });
+      if (r?.already_liked) {
+        // Nothing was liked: it was already in Liked Songs, so this only cleared it.
+        toast(cleared
+          ? html`Cleared <strong>${t.name}</strong> from your backlog · it was already in your Liked Songs`
+          : html`<strong>${t.name}</strong> is already in your Liked Songs${r?.queued ? ' · it clears from your backlog once Spotify allows' : ''}`,
+        { kind: 'success', icon: 'heartFilled', key: `track:${t.id}` });
+      } else {
+        const note = cleared ? ' and cleared it from your backlog' : (r?.queued ? ' · it clears from your backlog once Spotify allows' : '');
+        toast(html`Liked <strong>${t.name}</strong>${note}${auto}`, { kind: 'success', icon: 'heartFilled', key: `track:${t.id}` });
+      }
       store.refreshSoon(400);
     } catch (err) {
       likePending = null;

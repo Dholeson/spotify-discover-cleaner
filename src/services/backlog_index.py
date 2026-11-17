@@ -43,6 +43,16 @@ META_FIELDS = "name,snapshot_id,tracks.total,items.total"
 # Spotify has been migrating playlist entries from "track" to "item"; ask for both.
 _MEDIA_FIELDS = "id,uri,type,is_local,name,duration_ms,artists(id,name),album(id,name,images)"
 ITEM_FIELDS = f"items(added_at,is_local,track({_MEDIA_FIELDS}),item({_MEDIA_FIELDS})),next,total"
+# Development Mode apps created after 2026-02-11 only know the new names. If Spotify rejects a
+# filter that also names the old ones (400), the worker steps down this list; None = unfiltered.
+META_FIELDS_2026 = "name,snapshot_id,items.total"
+ITEM_FIELDS_2026 = f"items(added_at,is_local,item({_MEDIA_FIELDS})),next,total"
+META_FIELDS_CHAIN = (META_FIELDS, META_FIELDS_2026, None)
+ITEM_FIELDS_CHAIN = (ITEM_FIELDS, ITEM_FIELDS_2026, None)
+
+
+def _is_bad_request(exc):
+    return getattr(exc, "http_status", None) == 400 and not getattr(exc, "local", False)
 
 
 def _now_ms():
@@ -232,10 +242,13 @@ class PlaylistIndex:
 
     # ---------- reads ----------
     def contains(self, track_id):
-        """True / False, or None while the index is incomplete and the track is unknown."""
+        """True / False, or None while the index is incomplete and the track is unknown.
+        False when no backlog playlist is chosen yet (nothing is in a backlog that doesn't exist)."""
         if not track_id:
             return False
         with self._lock:
+            if not self.pid:
+                return False
             if track_id in self.ids:
                 return True
             run = self._run
@@ -644,8 +657,34 @@ class IndexSyncWorker:
         self._clock = clock
         self.pages_fetched = 0
         self.meta_checks = 0
-        # The fields filter keeps pages small; if Spotify ever rejects it (400), page unfiltered.
+        # The fields filters keep pages small; when Spotify rejects one (400) the worker steps
+        # down META_FIELDS_CHAIN / ITEM_FIELDS_CHAIN (both names -> 2026 names -> unfiltered).
+        self.meta_fields = META_FIELDS
         self.item_fields = ITEM_FIELDS
+
+    @staticmethod
+    def _next_fields(chain, current):
+        """The filter after ``current`` in ``chain`` (None = unfiltered)."""
+        try:
+            i = chain.index(current)
+        except ValueError:
+            return None
+        return chain[i + 1] if i + 1 < len(chain) else None
+
+    def _fetch_meta(self, gen, sp, pid):
+        """sp.playlist() through the fields chain. A rejected filter is not sent again."""
+        while True:
+            fields = self.meta_fields
+            try:
+                if fields:
+                    return self._call(gen, lambda: sp.playlist(pid, fields=fields))
+                return self._call(gen, lambda: sp.playlist(pid))
+            except Exception as e:
+                if not fields or not _is_bad_request(e):
+                    raise
+                # Expected once per session on a 2026 app: not an app error.
+                log.info("backlog index: playlist fields filter %r rejected (%s); trying the next one", fields, e)
+                self.meta_fields = self._next_fields(META_FIELDS_CHAIN, fields)
 
     def _log(self, exc, context):
         if self._log_error is not None:
@@ -721,7 +760,7 @@ class IndexSyncWorker:
         while True:
             self._invalidate(pid)
             try:
-                meta = self._call(gen, lambda: sp.playlist(pid, fields=META_FIELDS))
+                meta = self._fetch_meta(gen, sp, pid)
             except Exception as e:
                 self._log(e, "backlog index meta")
                 idx.set_error(gen, f"Couldn't check the playlist: {e}", retry_in_s=META_INTERVAL_S)
@@ -768,9 +807,9 @@ class IndexSyncWorker:
                 else:
                     page = self._call(gen, lambda: sp.playlist_items(pid, limit=PAGE_LIMIT, offset=offset))
             except Exception as e:
-                if fields and getattr(e, "http_status", None) == 400:
-                    self._log(e, "backlog index: fields filter rejected; paging unfiltered")
-                    self.item_fields = None
+                if fields and _is_bad_request(e):
+                    log.info("backlog index: items fields filter rejected (%s); trying the next one", e)
+                    self.item_fields = self._next_fields(ITEM_FIELDS_CHAIN, fields)
                     continue
                 errors += 1
                 self._log(e, f"backlog index page offset={offset}")

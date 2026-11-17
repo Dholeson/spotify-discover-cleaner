@@ -8,7 +8,20 @@ only mutates this in-memory simulation.
 Knobs (environment variables):
   FAKE_PL_SIZE         synthesize extra backlog tracks until the playlist has this many
   FAKE_TRACK_SECONDS   real seconds each simulated track "plays" before advancing (default 40)
+  FAKE_API_MODE        "legacy" (default): the Web API as apps created before 2026 see it.
+                       "2026": a Development Mode app created after 2026-02-11 (see API_2026 below).
+
+The 2026 mode emulates Spotify's restricted Web API for new Development Mode apps:
+  * playlist objects carry ``items`` (not ``tracks``); playlist entries carry ``item`` (not ``track``);
+  * ``fields=`` filters are applied, and a filter naming a field the object does not have is
+    rejected with 400 (pessimistic: callers must survive a rejected filter);
+  * removed endpoints (batch ``artists``, ``artist_top_tracks``, ``/browse/*``, ``/users/{id}*``,
+    ``/markets``) raise SpotifyException 403;
+  * ``search`` with limit > 10 raises 400 "Invalid limit";
+  * removed fields are absent: track/artist ``popularity``, artist ``followers``, user
+    ``country``/``email``/``product``/``explicit_content``/``followers``.
 """
+import hashlib
 import json
 import os
 import random
@@ -22,16 +35,106 @@ SIM_TRACK_SECONDS = int(os.environ.get("FAKE_TRACK_SECONDS", "40") or 40)
 BACKLOG_NAME = "Discover Backlog (demo)"
 OTHER_PLAYLIST_ID = "5bxGraveyardSandbox002"   # 22 chars, like a real playlist id
 OTHER_PLAYLIST_NAME = "Graveyard (demo)"
+API_LEGACY = "legacy"
+API_2026 = "2026"
+SEARCH_MAX_LIMIT_2026 = 10
 
 
 def _artist_id(name):
     return "fakeartist" + "".join(ch for ch in name.lower() if ch.isalnum())[:14]
 
 
+def _api_mode(value):
+    raw = str(value if value is not None else os.environ.get("FAKE_API_MODE", "") or "").strip().lower()
+    return API_2026 if raw == API_2026 else API_LEGACY
+
+
+class _InvalidFields(ValueError):
+    pass
+
+
+def parse_fields(spec):
+    """Spotify's ``fields`` filter as a tree {name: subtree | None}: ``a,b``, ``a.b``, ``a(b,c(d))``."""
+    spec = str(spec or "")
+    n = len(spec)
+    pos = 0
+
+    def merge(tree, name, sub):
+        if name not in tree:
+            tree[name] = sub
+        elif tree[name] is None or sub is None:
+            tree[name] = None  # the whole field wins over a partial selection
+        else:
+            for k, v in sub.items():
+                merge(tree[name], k, v)
+
+    def element():
+        nonlocal pos
+        start = pos
+        while pos < n and spec[pos] not in ",.()":
+            pos += 1
+        name = spec[start:pos].strip()
+        if not name:
+            raise _InvalidFields(f"empty field name at {start}")
+        sub = None
+        if pos < n and spec[pos] == ".":
+            pos += 1
+            k, v = element()
+            sub = {k: v}
+        elif pos < n and spec[pos] == "(":
+            pos += 1
+            sub = group()
+            if pos >= n or spec[pos] != ")":
+                raise _InvalidFields("unbalanced parentheses")
+            pos += 1
+        return name, sub
+
+    def group():
+        nonlocal pos
+        tree = {}
+        while True:
+            name, sub = element()
+            merge(tree, name, sub)
+            if pos < n and spec[pos] == ",":
+                pos += 1
+                continue
+            return tree
+
+    tree = group()
+    if pos != n:
+        raise _InvalidFields(f"unexpected {spec[pos]!r} at {pos}")
+    return tree
+
+
+def project_fields(obj, tree, strict=True, path=""):
+    """Keep only the fields in ``tree``. With ``strict`` a requested field the object lacks is an
+    error (lists are checked element by element; an empty list checks nothing)."""
+    if isinstance(obj, list):
+        return [project_fields(x, tree, strict, path) for x in obj]
+    if not isinstance(obj, dict):
+        return obj
+    out = {}
+    for name, sub in tree.items():
+        if name not in obj:
+            if strict:
+                raise _InvalidFields(f"unknown field {path}{name}")
+            continue
+        out[name] = obj[name] if sub is None else project_fields(obj[name], sub, strict, f"{path}{name}.")
+    return out
+
+
+def _forbidden(endpoint):
+    return spotipy.SpotifyException(
+        403, -1, f"fake: {endpoint} is not available to Development Mode apps created after 2026-02-11",
+        reason="Forbidden", headers={})
+
+
 class FakeSpotify:
-    def __init__(self, db_path, playlist_id):
+    def __init__(self, db_path, playlist_id, api_mode=None):
         self._lock = threading.RLock()
         self.playlist_id = playlist_id
+        self.api_mode = _api_mode(api_mode)
+        self.modern = self.api_mode == API_2026
         self.calls = []
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
@@ -66,6 +169,9 @@ class FakeSpotify:
             tid = f"fk{n:020d}"
             self.tracks.append(dict(src, id=tid, uri=f"spotify:track:{tid}", name=f"{src['name']} (take {n})",
                                     external_urls={"spotify": f"https://open.spotify.com/track/{tid}"}))
+        if self.modern:
+            for t in self.tracks:   # removed for new apps (synthesized copies share no dicts with base)
+                t.pop("popularity", None)
         self.pl = list(self.tracks)
         rnd.shuffle(self.pl)
         self.liked = set(t["id"] for t in self.tracks[: max(1, len(self.tracks) // 5)])
@@ -75,8 +181,22 @@ class FakeSpotify:
         self.snapshot = 1
 
     # ---------- object builders ----------
+    def _aid(self, name):
+        """A stable fake artist id. Names sharing the 14-character slug prefix ("Dance Gavin Dance"
+        and "Dance Gavin Dance Tribute Band") used to share one id; later names get a suffix."""
+        ids = self.__dict__.setdefault("_ids_by_name", {})
+        owners = self.__dict__.setdefault("_names_by_id", {})
+        aid = ids.get(name)
+        if aid is None:
+            aid = _artist_id(name)
+            if owners.get(aid, name) != name:
+                aid += hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
+            ids[name] = aid
+            owners[aid] = name
+        return aid
+
     def _track_obj(self, r, artist_names):
-        artists = [{"id": _artist_id(n.strip()), "name": n.strip(), "uri": f"spotify:artist:{_artist_id(n.strip())}",
+        artists = [{"id": self._aid(n.strip()), "name": n.strip(), "uri": f"spotify:artist:{self._aid(n.strip())}",
                     "external_urls": {"spotify": ""}} for n in artist_names.split(",") if n.strip()]
         img = r["image_url"] or ""
         return {
@@ -102,9 +222,13 @@ class FakeSpotify:
                     break
         name = name or "Unknown Artist"
         img = next((t["album"]["images"] for t in self.tracks if any(a["id"] == aid for a in t["artists"])), [])
-        return {"id": aid, "name": name, "genres": self.genres_by_artist.get(name, []), "images": img,
-                "followers": {"total": 12345}, "popularity": 42, "uri": f"spotify:artist:{aid}",
-                "external_urls": {"spotify": ""}, "type": "artist"}
+        obj = {"id": aid, "name": name, "genres": self.genres_by_artist.get(name, []), "images": img,
+               "followers": {"total": 12345}, "popularity": 42, "uri": f"spotify:artist:{aid}",
+               "external_urls": {"spotify": ""}, "type": "artist"}
+        if self.modern:
+            obj.pop("followers")
+            obj.pop("popularity")
+        return obj
 
     def _page(self, items, offset, limit, total, kind):
         nxt = f"sandbox:{kind}:{offset + limit}:{limit}" if offset + limit < total else None
@@ -197,6 +321,9 @@ class FakeSpotify:
 
     # ---------- user / library ----------
     def current_user(self, *a, **k):
+        if self.modern:
+            return {"id": "demo_user", "display_name": "Demo Listener", "images": [], "type": "user",
+                    "uri": "spotify:user:demo_user", "external_urls": {"spotify": ""}}
         return {"id": "demo_user", "display_name": "Demo Listener", "images": [], "country": "US",
                 "product": "premium"}
 
@@ -241,19 +368,44 @@ class FakeSpotify:
 
     def current_user_playlists(self, limit=50, offset=0, **k):
         owner = {"id": "demo_user", "display_name": "Demo Listener"}
+        key = "items" if self.modern else "tracks"   # 2026: the simplified playlist's {href,total} is "items"
         pls = [
-            {"id": self.playlist_id, "name": BACKLOG_NAME, "tracks": {"total": len(self.pl)}, "owner": owner,
+            {"id": self.playlist_id, "name": BACKLOG_NAME, key: {"total": len(self.pl)}, "owner": owner,
              "images": [], "collaborative": False, "public": False, "snapshot_id": str(self.snapshot)},
-            {"id": OTHER_PLAYLIST_ID, "name": OTHER_PLAYLIST_NAME, "tracks": {"total": 0}, "owner": owner,
+            {"id": OTHER_PLAYLIST_ID, "name": OTHER_PLAYLIST_NAME, key: {"total": 0}, "owner": owner,
              "images": [], "collaborative": False, "public": False, "snapshot_id": "1"},
         ]
         return self._page(pls[offset: offset + limit], offset, limit, len(pls), "playlists")
 
     # ---------- playlists ----------
+    def _apply_fields(self, obj, fields):
+        """2026 mode applies fields= (strictly); legacy mode keeps ignoring it, as before."""
+        if not self.modern or not fields:
+            return obj
+        try:
+            return project_fields(obj, parse_fields(fields), strict=True)
+        except _InvalidFields as e:
+            raise spotipy.SpotifyException(400, -1, f"fake: Invalid fields filter ({e})",
+                                           reason="Bad Request", headers={})
+
+    def _entry(self, t):
+        if self.modern:
+            return {"added_at": "2026-05-01T00:00:00Z", "item": t, "is_local": False}
+        return {"added_at": "2026-05-01T00:00:00Z", "track": t, "is_local": False}
+
     def playlist(self, playlist_id, fields=None, **k):
         self._record("playlist")
         name = BACKLOG_NAME if playlist_id == self.playlist_id else OTHER_PLAYLIST_NAME
         total = len(self.pl) if playlist_id == self.playlist_id else 0
+        if self.modern:
+            with self._lock:
+                src = list(self.pl) if playlist_id == self.playlist_id else []
+            first = self._page([self._entry(t) for t in src[:100]], 0, 100, len(src), f"pl-{playlist_id}")
+            obj = {"id": playlist_id, "name": name, "snapshot_id": str(self.snapshot), "items": first,
+                   "owner": {"id": "demo_user", "display_name": "Demo Listener"}, "images": [],
+                   "collaborative": False, "public": False, "description": "", "type": "playlist",
+                   "uri": f"spotify:playlist:{playlist_id}", "external_urls": {"spotify": ""}}
+            return self._apply_fields(obj, fields)
         return {"id": playlist_id, "name": name, "snapshot_id": str(self.snapshot),
                 "tracks": {"total": total, "items": [], "next": None},
                 "owner": {"id": "demo_user", "display_name": "Demo Listener"}, "images": [],
@@ -262,8 +414,10 @@ class FakeSpotify:
     def playlist_items(self, playlist_id, fields=None, limit=100, offset=0, **k):
         self._record("playlist_items")
         src = self.pl if playlist_id == self.playlist_id else []
-        items = [{"added_at": "2026-05-01T00:00:00Z", "track": t, "is_local": False} for t in src[offset: offset + limit]]
-        return self._page(items, offset, limit, len(src), f"pl-{playlist_id}")
+        items = [self._entry(t) for t in src[offset: offset + limit]]
+        # The next "URL" keeps the fields filter, like Spotify's does.
+        kind = f"pl-{playlist_id}" + (f"|{fields}" if fields and self.modern else "")
+        return self._apply_fields(self._page(items, offset, limit, len(src), kind), fields)
 
     playlist_tracks = playlist_items
 
@@ -300,7 +454,8 @@ class FakeSpotify:
         _, kind, offset, limit = str(nxt).split(":", 3)
         offset, limit = int(offset), int(limit)
         if kind.startswith("pl-"):
-            return self.playlist_items(kind[3:], limit=limit, offset=offset)
+            pid, _, fields = kind[3:].partition("|")
+            return self.playlist_items(pid, fields=fields or None, limit=limit, offset=offset)
         if kind == "saved":
             return self.current_user_saved_tracks(limit=limit, offset=offset)
         if kind == "toptracks":
@@ -316,9 +471,15 @@ class FakeSpotify:
         return self._artist_obj(artist_id)
 
     def artists(self, artists, **k):
+        self._record("artists")
+        if self.modern:
+            raise _forbidden("GET /artists (several artists)")
         return {"artists": [self._artist_obj(a.split(":")[-1]) for a in artists]}
 
     def artist_top_tracks(self, artist_id, country="US", **k):
+        self._record("artist_top_tracks")
+        if self.modern:
+            raise _forbidden("GET /artists/{id}/top-tracks")
         return {"tracks": [t for t in self.tracks if any(a["id"] == artist_id for a in t["artists"])][:10]}
 
     def artist_albums(self, artist_id, album_type=None, include_groups=None, country=None, limit=20, offset=0, **k):
@@ -340,6 +501,9 @@ class FakeSpotify:
         return self._page(a["tracks"]["items"][offset: offset + limit], offset, limit, a["tracks"]["total"], "x")
 
     def search(self, q="", limit=10, offset=0, type="track", market=None, **k):
+        self._record("search")
+        if self.modern and int(limit or 0) > SEARCH_MAX_LIMIT_2026:
+            raise spotipy.SpotifyException(400, -1, "fake: Invalid limit", reason="Bad Request", headers={})
         ql = (q or "").lower()
         words = [w for w in ql.replace("artist:", " ").replace("track:", " ").replace('"', " ").split() if w]
         match = [t for t in self.tracks
@@ -365,3 +529,23 @@ class FakeSpotify:
     recommendations = _gone
     audio_features = _gone
     _get = _gone
+
+    # Removed for Development Mode apps created after 2026-02-11 (403 in 2026 mode). The app
+    # does not call these; they exist so a regression that starts to would fail loudly.
+    def _removed_2026(endpoint):
+        def call(self, *a, **k):
+            self._record(endpoint)
+            if self.modern:
+                raise _forbidden(endpoint)
+            raise spotipy.SpotifyException(404, -1, f"fake: {endpoint} is not simulated", headers={})
+        return call
+
+    new_releases = _removed_2026("GET /browse/new-releases")
+    featured_playlists = _removed_2026("GET /browse/featured-playlists")
+    categories = _removed_2026("GET /browse/categories")
+    category_playlists = _removed_2026("GET /browse/categories/{id}/playlists")
+    user = _removed_2026("GET /users/{id}")
+    user_playlists = _removed_2026("GET /users/{id}/playlists")
+    user_playlist_create = _removed_2026("POST /users/{id}/playlists")
+    available_markets = _removed_2026("GET /markets")
+    del _removed_2026

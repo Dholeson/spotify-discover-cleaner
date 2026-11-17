@@ -1,5 +1,5 @@
-/* Artist page (#/artist/<name>), scoped under .view-artist. Also the ranked-list component
-   (components/artist-ranklist.js, .rk-*). */
+/* Artist page (#/artist/<name>), scoped under .view-artist. The top tracks/albums use the shared
+   ranked list (components/rank-list.js), styled in insights.css ("ranked lists"). */
 
 .view-artist .ar { display: flex; flex-direction: column; gap: 0; min-width: 0; }
 .view-artist .ar-body { display: flex; flex-direction: column; min-width: 0; }
@@ -118,33 +118,9 @@
 .view-artist .ar-tops .section-head { margin-bottom: var(--sp-3); padding: 0 var(--sp-1); }
 .view-artist .ar-more-btn { margin-top: var(--sp-2); }
 
-/* ======================================================================= ranked list (.rk) */
-.rk { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.rk-row {
-  display: grid; grid-template-columns: 2.4ch 32px minmax(0, 1fr) auto; align-items: center; column-gap: 10px;
-  min-height: 52px; padding: 6px 8px; border-radius: var(--radius-sm);
-  transition: background-color var(--dur-fast) var(--ease);
-}
-.rk-row:not(:has(.rk-trail)) { grid-template-columns: 2.4ch 32px minmax(0, 1fr); }
-.rk-row:hover, .rk-row:focus-within { background: var(--hover); }
-.rk-rank { text-align: right; font-size: var(--fs-13); color: var(--muted); font-variant-numeric: tabular-nums; }
-.rk-lead { display: grid; place-items: center; width: 32px; height: 32px; }
-.rk-lead .rk-play { width: 32px; height: 32px; }
-.rk-row.is-playing .rk-title { color: var(--accent-text); }
-.rk-row.is-playing .rk-play { color: var(--accent-text); }
-.rk-art { width: 32px; height: 32px; border-radius: 4px; object-fit: cover; display: grid; place-items: center; background: var(--surface-3); color: var(--muted); }
-.rk-art .icon { width: 16px; height: 16px; }
-.rk-main { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.rk-text { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.rk-title { font-size: var(--fs-14); font-weight: var(--fw-semibold); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
-.rk-sub { font-size: var(--fs-12); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 0; }
-.rk-barline { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.rk-bar {
-  flex: none; height: 8px; min-width: 2px; width: calc((100% - 56px) * var(--pct, 0));
-  border-radius: 0 4px 4px 0; background: var(--series-1);
-}
-.rk-val { flex: none; font-size: var(--fs-13); line-height: 1; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.rk-trail { display: flex; align-items: center; }
+/* ======================================================================= ranked lists */
+/* the shared list switches to its wide layout by the card's width, not the window's */
+.view-artist .ar-rank { container-type: inline-size; min-width: 0; }
 
 /* ======================================================================= popular tracks */
 .view-artist .ar-unheard-card { padding: var(--sp-2); }
@@ -305,7 +281,7 @@
   .view-artist .ar-sim-art { width: 80px; height: 80px; }
   .view-artist .ar-chart-card { padding: var(--sp-3) var(--sp-3) var(--sp-3); }
   .view-artist .ar-tops .card { padding: var(--sp-3) var(--sp-2) var(--sp-2); }
-  .rk-row { column-gap: 8px; padding: 6px 4px; }
+  .view-artist .ar-rank .ins-top-row { column-gap: 8px; padding: 6px 4px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

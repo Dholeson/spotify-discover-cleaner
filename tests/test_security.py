@@ -171,6 +171,9 @@ class JsonErrorsTest(Base):
             r = self.client.post("/api/research", json={"entity_name": "X", "entity_type": "planet"})
             self.assertEqual(r.status_code, 400)
             self.assertEqual(r.get_json()["error"]["field"], "entity_type")
+            r = self.client.post("/api/research", json={"entity_name": "X", "artist_name": {"a": 1}})
+            self.assertEqual(r.status_code, 400)
+            self.assertEqual(r.get_json()["error"]["field"], "artist_name")
             r = self.client.patch("/api/research/1", json={"status": "gone"})
             self.assertEqual(r.status_code, 400)
         finally:

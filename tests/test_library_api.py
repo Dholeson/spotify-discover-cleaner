@@ -202,6 +202,51 @@ class WatchlistTests(StubAppMixin, unittest.TestCase):
         self.assertEqual(r.get_json()["error"]["code"], "watchlist_unavailable")
 
 
+class WatchlistArtistTests(StubAppMixin, unittest.TestCase):
+    """Tracks/albums saved without a Spotify id keep their artist (column added lazily)."""
+
+    def setUp(self):
+        self.L = library_ledger()
+        self.install_app(self.L.conn, backlog=FakeBacklog([]))
+        from src.persistence import research
+        self.R = research
+
+    def tearDown(self):
+        self.uninstall_app()
+
+    def test_idless_track_keeps_its_artist_plays_and_art(self):
+        iid = self.R.add_interest("track", "Clever", artist_name="by Beartooth", reasons=["guitar tone"])
+        self.assertEqual(self.R.get_interest(iid)["artist_name"], "Beartooth")
+        items = {i["entity_name"]: i for i in self.client.get("/api/v2/watchlist").get_json()["items"]}
+        clever = items["Clever"]
+        self.assertEqual(clever["artist"], "Beartooth")      # the UI shows "by Beartooth" + Play (resolve)
+        self.assertIsNone(clever["uri"])
+        self.assertEqual(clever["plays"], 5)
+        self.assertEqual(clever["image"], "https://i.scdn.co/image/clever")
+
+    def test_same_title_by_different_artists_stays_separate(self):
+        a = self.R.add_interest("track", "Intro", artist_name="Band A")
+        b = self.R.add_interest("track", "Intro", artist_name="Band B")
+        self.assertNotEqual(a, b)
+        self.assertEqual(self.R.add_interest("track", "intro", artist_name="band a", reasons=["lyrics"]), a)
+        self.assertEqual(self.R.get_interest(a)["reasons"], ["lyrics"])
+
+    def test_legacy_row_without_artist_learns_it(self):
+        old = self.R.add_interest("track", "Manolo")
+        self.assertIsNone(self.R.get_interest(old)["artist_name"])
+        self.assertEqual(self.R.add_interest("track", "Manolo", artist_name="Trip Lee"), old)
+        self.assertEqual(self.R.get_interest(old)["artist_name"], "Trip Lee")
+
+    def test_artist_entities_ignore_artist_name(self):
+        iid = self.R.add_interest("artist", "Sleep Token", artist_name="Sleep Token")
+        self.assertIsNone(self.R.get_interest(iid)["artist_name"])
+
+    def test_album_uses_saved_artist(self):
+        self.R.add_interest("album", "Disease", artist_name="Beartooth")
+        items = {i["entity_name"]: i for i in self.client.get("/api/v2/watchlist").get_json()["items"]}
+        self.assertEqual((items["Disease"]["artist"], items["Disease"]["plays"]), ("Beartooth", 3))
+
+
 class PlayCountTests(StubAppMixin, unittest.TestCase):
     def setUp(self):
         self.L = library_ledger()

@@ -8,7 +8,7 @@ import {
 import charts from '../core/charts.js';
 import {
   cachedGet, peek, isAbort, putChart, destroyCharts, coverageBanner, dayText, rangeText, hourText, deltaChip, cover,
-  playButton, MONTHS,
+  playButton, topList, MONTHS,
 } from './insights-common.js';
 
 const PATH = '/api/v2/insights/year-in-music';
@@ -176,9 +176,16 @@ export default function createYear({ api, router }) {
         <div class="ins-pod-detail">${detail}</div>
       </div>
     </section>`;
+    // There is no artist photo: the top artist borrows their top album's (or song's) cover, shown
+    // square like the other album art and labelled with where it comes from.
+    const from = a?.image ? a.image_from : null;
+    const artistArt = a && a.image
+      ? html`${cover(a.image, a.name, { size: 112, className: 'ins-pod-cover ins-pod-cover--borrowed' })}<span class="ins-pod-badge" aria-hidden="true">${cover(null, a.name, { round: true, size: 36 })}</span>`
+      : a ? cover(null, a.name, { round: true, size: 112, className: 'ins-pod-cover' }) : '';
     mount(el('podium'), [
-      a ? item('Top artist', cover(null, a.name, { round: true, size: 112, className: 'ins-pod-cover' }),
-        html`<a href="${artistHref(a.name)}">${a.name}</a>`, '',
+      a ? item('Top artist', artistArt,
+        html`<a href="${artistHref(a.name)}">${a.name}</a>`,
+        from?.name ? html`<span class="ins-pod-artnote" title="${`Album art: ${from.name}`}">${icon('disc')}<span class="truncate">Cover: ${from.name}${from.kind === 'track' ? ' (song)' : ''}</span></span>` : '',
         `${fmt.plural(a.plays, 'play')}${d.top_artist_share_pct != null ? ` · ${fmt.pct(d.top_artist_share_pct)} of your year` : ''}`) : '',
       t ? item('Top track', cover(t.image, t.name, { size: 112, className: 'ins-pod-cover' }),
         html`<span title="${t.name}">${t.name}</span>`, html`<a href="${artistHref(t.artist)}">${t.artist}</a>`,
@@ -191,23 +198,9 @@ export default function createYear({ api, router }) {
   }
 
   function renderTops(d) {
-    const top = Math.max(1, ...(d.top_artists || []).map((r) => r.plays));
-    mount(el('top-artists'), html`<ol class="ins-rows" role="list">${(d.top_artists || []).map((r) => html`<li class="ins-row">
-      <span class="ins-row-rank">${r.rank}</span>
-      ${cover(null, r.name, { round: true })}
-      <div class="ins-row-main"><a class="ins-row-title" href="${artistHref(r.name)}">${r.name}</a>
-        <span class="ins-row-bar" aria-hidden="true"><span style="width:${((r.plays / top) * 100).toFixed(1)}%"></span></span></div>
-      <span class="ins-row-meta">${fmt.num(r.plays)} <small>plays</small></span>
-    </li>`)}</ol>`);
-    const topT = Math.max(1, ...(d.top_tracks || []).map((r) => r.plays));
-    mount(el('top-tracks'), html`<ol class="ins-rows" role="list">${(d.top_tracks || []).map((r) => html`<li class="ins-row">
-      <span class="ins-row-rank">${r.rank}</span>
-      ${cover(r.image, r.name)}
-      <div class="ins-row-main"><span class="ins-row-title" title="${r.name}">${r.name}</span><span class="ins-row-sub"><a href="${artistHref(r.artist)}">${r.artist}</a></span>
-        <span class="ins-row-bar" aria-hidden="true"><span style="width:${((r.plays / topT) * 100).toFixed(1)}%"></span></span></div>
-      <span class="ins-row-meta">${fmt.num(r.plays)} <small>plays</small></span>
-      <span class="ins-row-act">${playButton({ id: r.spotify_track_id, artist: r.artist, name: r.name })}</span>
-    </li>`)}</ol>`);
+    // The same ranked list as Reports and the artist page (no change column: a year stands alone).
+    mount(el('top-artists'), topList(d.top_artists, { kind: 'artists', compare: false, label: `Top artists of ${d.year}`, empty: 'No artists this year.' }));
+    mount(el('top-tracks'), topList(d.top_tracks, { kind: 'tracks', compare: false, label: `Top songs of ${d.year}`, empty: 'No songs this year.' }));
   }
 
   function renderMonths(d) {

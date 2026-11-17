@@ -10,6 +10,7 @@
 //   #/library/<tab>               → {id:'library', params:{tab}}   (recent|backlog|liked|favorites|watchlist)
 //   #/search?q=…                  → {id:'search', query:{q}}
 //   #/settings, #/styleguide
+//   #/setup                       → first-run setup (Now shows it on its own until Spotify is set up)
 //
 // navigate('/artist/Sleep Token') or navigate(href('artist', {name})) pushes a history entry;
 // {replace:true} replaces it. setQuery({period:'year'}) updates query params (replace by default).
@@ -25,6 +26,7 @@ const ROUTES = [
   { id: 'search', re: /^\/search\/?$/ },
   { id: 'settings', re: /^\/settings\/?$/ },
   { id: 'styleguide', re: /^\/styleguide\/?$/ },
+  { id: 'setup', re: /^\/setup\/?$/ },
 ];
 
 export const DEFAULT_PATH = '/now';

@@ -10,10 +10,10 @@
 <link rel="stylesheet" href="{{ asset_url('css/tokens.css') }}">
 <link rel="stylesheet" href="{{ asset_url('css/base.css') }}">
 <link rel="stylesheet" href="{{ asset_url('css/charts.css') }}">
-{%- for v in ['now', 'insights', 'artist', 'artists', 'library', 'search', 'settings', 'styleguide'] %}
+{%- for v in ['now', 'insights', 'artist', 'artists', 'library', 'search', 'settings', 'styleguide', 'setup'] %}
 <link rel="stylesheet" href="{{ asset_url('css/views/' ~ v ~ '.css') }}">
 {%- endfor %}
-<script type="application/json" id="app-config">{{ {"pollIntervalMs": ((poll_interval or 3) * 1000) | int} | tojson }}</script>
+<script type="application/json" id="app-config">{{ {"pollIntervalMs": ((poll_interval or 3) * 1000) | int, "demo": demo_mode | default(false)} | tojson }}</script>
 </head>
 <body data-js-errors="0">
 <button type="button" class="skip-link" data-action="skip-to-content">Skip to content</button>

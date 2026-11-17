@@ -139,7 +139,7 @@ export function createBacklogTab() {
     const threshold = Number(status?.threshold_seconds) || null;
     const auto = status?.auto_clean ? !!status.auto_clean.enabled : true;
     const today = status?.today || {};
-    const syncing = b.loading || b.complete === false;
+    const syncing = !!b.playlist_id && (b.loading || b.complete === false);   // no playlist chosen: nothing to load
     const progress = b.progress || {};
     let syncText;
     if (syncing) syncText = `Loading from Spotify · ${fmt.num(progress.loaded ?? b.known ?? 0)} of ${fmt.num(progress.total ?? total ?? 0)}`;

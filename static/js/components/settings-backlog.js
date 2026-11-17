@@ -63,6 +63,9 @@ export function createBacklogSection(env) {
     if (signedOut(s)) {
       return notice({ tone: 'warning', compact: true, title: 'Spotify is not connected', body: 'Connect Spotify so the app can see what you play and clear it from this playlist.', actions: html`<a class="btn btn-primary btn-sm" href="/login">${icon('link')}Connect Spotify</a>` });
     }
+    if (!b.playlist_id) {
+      return notice({ tone: 'info', compact: true, title: 'No backlog playlist yet', body: 'Choose the playlist to clear as you listen. Nothing is removed until you do.' });
+    }
     const parts = [];
     if (b.loading || b.complete === false) {
       const loaded = b.progress?.loaded ?? b.known ?? 0;
@@ -86,18 +89,18 @@ export function createBacklogSection(env) {
   function playlistCard(s) {
     const m = playlistMeta(s);
     const out = signedOut(s);
-    const syncing = !!(backlogOf(s).loading || backlogOf(s).complete === false);
+    const syncing = !!m.id && !!(backlogOf(s).loading || backlogOf(s).complete === false);
     const openUrl = m.id ? safeUrl(`https://open.spotify.com/playlist/${encodeURIComponent(m.id)}`, '') : '';
     return html`
       <div class="st-pl">
         ${m.image ? thumb(m.image, { className: 'st-pl-art' }) : html`<span class="st-pl-art st-pl-art-ph" aria-hidden="true">${icon('backlog')}</span>`}
         <div class="st-pl-main">
           <div class="st-eyebrow">Clearing from</div>
-          <div class="st-pl-name">${m.name || (out ? 'No playlist yet' : 'Loading…')}</div>
-          <div class="st-pl-meta">${m.total > 0 || (m.total === 0 && !syncing) ? html`<span>${fmt.plural(m.total, 'track')} left</span>` : syncing ? html`<span>Counting tracks…</span>` : ''}${m.owner ? html`<span>· ${m.collaborative ? 'Collaborative' : `Owned by ${m.owner}`}</span>` : ''}</div>
+          <div class="st-pl-name">${m.name || (out || !m.id ? 'No playlist yet' : 'Loading…')}</div>
+          <div class="st-pl-meta">${m.id && (m.total > 0 || (m.total === 0 && !syncing)) ? html`<span>${fmt.plural(m.total, 'track')} left</span>` : syncing ? html`<span>Counting tracks…</span>` : ''}${m.owner ? html`<span>· ${m.collaborative ? 'Collaborative' : `Owned by ${m.owner}`}</span>` : ''}</div>
         </div>
         <div class="st-pl-actions">
-          <button type="button" class="btn btn-secondary" data-st="pick" ${out ? 'disabled' : ''}>${icon('backlog')}Change playlist</button>
+          <button type="button" class="btn btn-secondary" data-st="pick" ${out ? 'disabled' : ''}>${icon('backlog')}${m.id ? 'Change playlist' : 'Choose playlist'}</button>
           <button type="button" class="btn btn-icon" data-st="recheck" aria-label="Check the playlist for changes now" data-tip="Check for changes now" ${out ? 'disabled' : ''}>${icon('refresh')}</button>
           ${openUrl ? html`<a class="btn btn-icon" href="${openUrl}" target="_blank" rel="noopener noreferrer" aria-label="Open ${m.name || 'playlist'} in Spotify" data-tip="Open in Spotify">${icon('external')}</a>` : ''}
         </div>
@@ -355,7 +358,7 @@ export function createBacklogSection(env) {
       const pid = btn.dataset.pid;
       if (!pid || pid === currentId) { if (pid === currentId) toast(`${q(currentName)} is already your backlog playlist.`, { kind: 'info' }); return; }
       const newName = btn.dataset.pname || '';
-      const ok = await confirmDialog({
+      const ok = !currentId || await confirmDialog({
         title: 'Switch backlog playlist?',
         body: html`<p>Switch the playlist that gets cleared from <strong>${q(currentName)}</strong> to <strong>${newName ? q(newName) : 'the pasted playlist'}</strong>?</p>
           <p class="st-confirm-note">From now on, tracks you listen to are cleared from the new playlist. Nothing is removed from ${q(currentName)}, and your listening history stays as it is.</p>`,
@@ -416,6 +419,7 @@ export function createBacklogSection(env) {
 
   // ------------------------------------------------------------------ section API
   return {
+    openPicker,
     id: 'backlog',
     label: 'Backlog & clearing',
     icon: 'backlog',
@@ -488,4 +492,9 @@ export function createBacklogSection(env) {
   };
 }
 
-export default { createBacklogSection, parsePlaylistId };
+/** The playlist picker on its own (the first-run "Pick your backlog playlist" step uses it). */
+export function openPlaylistPicker(opener) {
+  return createBacklogSection().openPicker(opener);
+}
+
+export default { createBacklogSection, parsePlaylistId, openPlaylistPicker };

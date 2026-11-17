@@ -9,6 +9,8 @@ import threading
 import unittest
 
 from src.services.backlog_index import (
+    ITEM_FIELDS,
+    ITEM_FIELDS_2026,
     IndexSyncWorker,
     PlaylistIndex,
     SQLiteIndexStore,
@@ -205,8 +207,9 @@ class GuardAndErrorTests(unittest.TestCase):
         src.playlist_items = strict
         self.assertEqual(worker.sync(src), "committed")
         self.assertEqual(idx.status()["known"], 250)
-        self.assertIsNotNone(seen[0])
-        self.assertEqual(seen[1:], [None, None, None])
+        # Both-names filter, then the 2026-only filter, then unfiltered for every page.
+        self.assertEqual(seen[:2], [ITEM_FIELDS, ITEM_FIELDS_2026])
+        self.assertEqual(seen[2:], [None, None, None])
 
     def test_worker_step_waits_for_real_rate_limit_lock(self):
         idx, src, _, clock, _ = build(100)

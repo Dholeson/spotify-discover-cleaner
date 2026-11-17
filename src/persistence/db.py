@@ -22,7 +22,28 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent.parent.parent / "music_explorer.db"
+APP_DIR = Path(__file__).parent.parent.parent
+
+
+def resolve_data_dir(env=None) -> Path:
+    """Folder for the database, .config.json, the Spotify token cache and backups.
+
+    ``DISCOVER_DATA_DIR`` (environment or .env) overrides it; a relative value is taken
+    relative to the app folder. Unset means the app folder itself, so existing installs keep
+    using the files they already have. ``.env`` always stays in the app folder.
+    """
+    raw = ((env if env is not None else os.environ).get("DISCOVER_DATA_DIR") or "").strip()
+    if not raw:
+        return APP_DIR
+    path = Path(os.path.expandvars(os.path.expanduser(raw)))
+    if not path.is_absolute():
+        path = APP_DIR / path
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+DATA_DIR = resolve_data_dir()
+DB_PATH = DATA_DIR / "music_explorer.db"
 SCHEMA_VERSION = 3
 
 _local = threading.local()

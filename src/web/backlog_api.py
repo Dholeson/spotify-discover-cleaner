@@ -126,7 +126,14 @@ def _spotify_error(exc, what):
     return api_error("spotify_error", f"Spotify rejected the request, so {what} didn't happen.", 502)
 
 
-def _entry_row(position, e):
+def _entry_row(position, e, restored_dates=None):
+    added_at = e.get("added_at")
+    if restored_dates is not None:
+        try:
+            # a track brought back with Undo shows the date it was first added
+            added_at = restored_dates.display_added_at(e.get("track_id"), added_at)
+        except Exception:
+            pass
     return {
         "position": position,
         "id": e.get("track_id"),
@@ -137,7 +144,7 @@ def _entry_row(position, e):
         "album": e.get("album") or "",
         "image": e.get("image"),
         "duration_ms": int(e.get("duration_ms") or 0),
-        "added_at": e.get("added_at"),
+        "added_at": added_at,
         "is_local": bool(e.get("is_local")),
     }
 
@@ -166,7 +173,7 @@ def backlog_summary():
 
 @bp.route("/api/v2/backlog/tracks", methods=["GET"])
 def backlog_tracks():
-    index, _ = _services()
+    index, engine = _services()
     offset, err = _int_arg("offset", 0, 0, 10_000_000)
     if err:
         return err
@@ -198,7 +205,7 @@ def backlog_tracks():
         "limit": limit,
         "q": q,
         "matched": len(rows),
-        "items": [_entry_row(pos, e) for pos, e in page],
+        "items": [_entry_row(pos, e, getattr(engine, "restored_dates", None)) for pos, e in page],
     })
 
 
@@ -338,11 +345,13 @@ def _iso_ms(value):
 
 
 def _catch_up_excluded(engine, tid):
-    """Tracks the listener chose to keep this session (Keep, or brought back with Undo)."""
+    """Tracks the listener chose to keep this session: Keep, brought back with Undo, or heard
+    while auto-clear was paused (Now said "this track stays")."""
     if engine is None:
         return False
     try:
-        return bool(engine.was_kept(tid) or engine.recently_restored(tid))
+        paused = getattr(engine, "heard_while_paused", None)
+        return bool(engine.was_kept(tid) or engine.recently_restored(tid) or (paused is not None and paused(tid)))
     except Exception:
         return False
 
@@ -351,8 +360,8 @@ def catch_up_candidates(core, sp, index, engine=None):
     """Recently played tracks (last 50) still in the backlog, newest play first, current track excluded.
 
     A play only counts when it happened after the track was added to the backlog (a track heard
-    two weeks ago and added yesterday hasn't been heard since), and tracks kept or restored this
-    session are left alone.
+    two weeks ago and added yesterday hasn't been heard since), and tracks kept, restored or heard
+    while auto-clear was paused this session are left alone.
     """
     if engine is None:
         from src.services import clearing

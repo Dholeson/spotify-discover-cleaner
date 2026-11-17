@@ -15,7 +15,7 @@ import {
   bindChoiceGroup, withBusy, setRefetching, safeUrl, toDate, initialsAvatar as avatarPh, notice,
 } from '../core/ui.js';
 import { playTrack } from '../components/player.js';
-import { rankList } from '../components/artist-ranklist.js';
+import { rankList } from '../components/rank-list.js';
 import { openWatchlistDialog } from '../components/watchlist-dialog.js';
 
 const SHOW_TRACKS = 10;
@@ -391,7 +391,7 @@ function renderNowPlaying(status) {
   }
   // Mark the playing song in "Your top tracks".
   const cur = byThem ? fold(t.name) : '';
-  rootEl?.querySelectorAll('.ar-tracks .rk-row').forEach((row) => {
+  rootEl?.querySelectorAll('.ar-tracks .bl-item').forEach((row) => {
     const on = !!cur && (row.dataset.id === playingId || row.dataset.fold === cur);
     row.classList.toggle('is-playing', on);
   });
@@ -461,8 +461,8 @@ function factsHtml() {
   const liked = Number(S.info?.listen_stats?.spotify_liked_count || 0);
   const cleared = Number(st.backlog?.cleared_count || 0);
   const facts = [];
-  if (liked > 0) facts.push(html`<li>${icon('heartFilled')}<span><strong>${fmt.num(liked)}</strong> of their songs are in your Liked Songs</span></li>`);
-  if (cleared > 0) facts.push(html`<li>${icon('clear')}<span><strong>${fmt.num(cleared)}</strong> of their tracks were cleared from your backlog</span></li>`);
+  if (liked > 0) facts.push(html`<li>${icon('heartFilled')}<span><strong>${fmt.num(liked)}</strong> of their songs ${liked === 1 ? 'is' : 'are'} in your Liked Songs</span></li>`);
+  if (cleared > 0) facts.push(html`<li>${icon('clear')}<span><strong>${fmt.num(cleared)}</strong> of their tracks ${cleared === 1 ? 'was' : 'were'} cleared from your backlog</span></li>`);
   return facts.length ? html`<ul class="ar-facts" aria-label="More about you and ${displayName()}">${facts}</ul>` : '';
 }
 
@@ -596,7 +596,7 @@ function renderCharts() {
 
   const yFig = charts.yearBars(years, {
     title: 'Plays per year',
-    subtitle: years.length ? `${years[0].label}–${years[years.length - 1].label}${years[years.length - 1].label === String(new Date().getFullYear()) ? ' (this year so far)' : ''}` : '',
+    subtitle: yearsSubtitle(years),
     valueLabel: 'plays', height: 200, highlightKey: peakYear?.key, tableToggle: true,
     caption: peakYear && peakYear.value ? `Most plays in ${peakYear.label}: ${fmt.num(peakYear.value)}` : '',
   });
@@ -612,6 +612,16 @@ function renderCharts() {
 }
 
 // ======================================================================= top tracks + albums
+/** "2021–2026 (this year so far)", or one year on its own ("2026 so far") when they're the same. */
+function yearsSubtitle(years) {
+  if (!years.length) return '';
+  const first = years[0].label;
+  const last = years[years.length - 1].label;
+  const running = last === String(new Date().getFullYear());
+  if (first === last) return running ? `${last} so far` : String(last);
+  return `${first}–${last}${running ? ' (this year so far)' : ''}`;
+}
+
 function releaseForAlbum(albumName) {
   const rels = S.disco?.albums || [];
   if (!rels.length) return null;
@@ -633,22 +643,23 @@ function renderTops() {
   const albums = st.top_albums || [];
   const shownT = S.showAllTracks ? tracks : tracks.slice(0, SHOW_TRACKS);
   const shownA = S.showAllAlbums ? albums : albums.slice(0, SHOW_TRACKS);
-  const playing = store.status?.current_track;
 
-  const trackItems = shownT.map((t, i) => {
-    const uri = t.spotify_track_id ? `spotify:track:${t.spotify_track_id}` : '';
-    const lead = uri
-      ? html`<button type="button" class="btn btn-icon btn-sm rk-play" data-action="play-uri" data-uri="${uri}" data-name="${t.name}" aria-label="Play ${t.name}" data-tip="Play">${icon('play')}</button>`
-      : html`<button type="button" class="btn btn-icon btn-sm rk-play" data-action="play-track" data-artist="${name}" data-name="${t.name}" aria-label="Play ${t.name}" data-tip="Find on Spotify and play">${icon('play')}</button>`;
-    const sub = [t.album, t.variants > 1 ? `${t.variants} versions` : ''].filter(Boolean).join(' · ');
-    return { key: t.song_key, rank: i + 1, title: t.name, sub, value: t.plays, lead, playing: !!playing && playing.id && playing.id === t.spotify_track_id };
-  });
+  // The same ranked-list look as Insights: rank · cover · title / sub · bar + plays · action.
+  const trackItems = shownT.map((t, i) => ({
+    key: t.song_key, rank: i + 1, name: t.name, artist: name, plays: t.plays, spotify_track_id: t.spotify_track_id,
+    image: httpUrl(t.image) || null, href: null,
+    sub: [t.album, t.variants > 1 ? `${t.variants} versions` : ''].filter(Boolean).join(' · '),
+    // read by renderNowPlaying to mark the song playing now
+    attrs: { 'data-id': t.spotify_track_id || '', 'data-fold': fold(t.name) },
+  }));
   const albumItems = shownA.map((a, i) => {
     const rel = releaseForAlbum(a.name);
-    const art = rel?.images?.length ? httpUrl(rel.images[rel.images.length - 1]?.url || rel.images[0]?.url) : '';
-    const lead = art ? html`<img class="rk-art" src="${art}" alt="" loading="lazy" decoding="async">` : html`<span class="rk-art rk-art-ph" aria-hidden="true">${icon('disc')}</span>`;
-    const trailing = rel ? html`<button type="button" class="btn btn-icon btn-sm" data-action="ar-open-release" data-id="${rel.id}" aria-label="Show ${a.name} in the discography" data-tip="Show in discography">${icon('chevronRight')}</button>` : '';
-    return { key: a.album_key, rank: i + 1, title: a.name, sub: fmt.plural(a.tracks_heard, 'song') + ' heard', value: a.plays, lead, trailing };
+    const relArt = rel?.images?.length ? httpUrl(rel.images[rel.images.length - 1]?.url || rel.images[0]?.url) : '';
+    return {
+      key: a.album_key, rank: i + 1, name: a.name, plays: a.plays, image: httpUrl(a.image) || relArt || null, href: null,
+      sub: `${fmt.plural(a.tracks_heard, 'song')} heard`,
+      trailing: rel ? html`<button type="button" class="btn btn-icon btn-sm" data-action="ar-open-release" data-id="${rel.id}" aria-label="Show ${a.name} in the discography" data-tip="Show in discography">${icon('chevronRight')}</button>` : '',
+    };
   });
 
   mount(el, html`<section class="section" aria-labelledby="ar-sec-tops">
@@ -656,23 +667,16 @@ function renderTops() {
     <div class="ar-grid-2 ar-tops">
       <div class="card ar-tracks">
         ${sectionHeader({ title: 'Your top tracks', info: DEF.topTracks, desc: `Your most played songs by ${name}, all time`, level: 3 })}
-        ${trackItems.length ? rankList(trackItems, { valueLabel: 'plays', label: `Your top tracks by ${name}` }) : emptyState({ title: 'No songs yet', compact: true })}
+        ${trackItems.length ? html`<div class="ar-rank">${rankList(trackItems, { kind: 'tracks', compare: false, label: `Your top tracks by ${name}` })}</div>` : emptyState({ title: 'No songs yet', compact: true })}
         ${tracks.length > SHOW_TRACKS ? html`<button type="button" class="btn btn-ghost btn-sm ar-more-btn" data-action="ar-more-tracks" aria-expanded="${S.showAllTracks ? 'true' : 'false'}">${icon(S.showAllTracks ? 'chevronUp' : 'chevronDown')}${S.showAllTracks ? 'Show top 10' : `Show top ${tracks.length}`}</button>` : ''}
       </div>
       <div class="card ar-albums">
         ${sectionHeader({ title: 'Your top albums', info: DEF.topAlbums, desc: `Albums you played most, all time`, level: 3 })}
-        ${albumItems.length ? rankList(albumItems, { valueLabel: 'plays', label: `Your top albums by ${name}` }) : emptyState({ title: 'No album info', body: 'Your plays of this artist carry no album names.', compact: true, icon: 'disc' })}
+        ${albumItems.length ? html`<div class="ar-rank">${rankList(albumItems, { kind: 'albums', compare: false, label: `Your top albums by ${name}` })}</div>` : emptyState({ title: 'No album info', body: 'Your plays of this artist carry no album names.', compact: true, icon: 'disc' })}
         ${albums.length > SHOW_TRACKS ? html`<button type="button" class="btn btn-ghost btn-sm ar-more-btn" data-action="ar-more-albums" aria-expanded="${S.showAllAlbums ? 'true' : 'false'}">${icon(S.showAllAlbums ? 'chevronUp' : 'chevronDown')}${S.showAllAlbums ? 'Show top 10' : `Show top ${albums.length}`}</button>` : ''}
       </div>
     </div>
   </section>`);
-  // data for the now-playing marker
-  el.querySelectorAll('.ar-tracks .rk-row').forEach((row, i) => {
-    const t = shownT[i];
-    if (!t) return;
-    row.dataset.id = t.spotify_track_id || '';
-    row.dataset.fold = fold(t.name);
-  });
   renderNowPlaying(store.status);
 }
 

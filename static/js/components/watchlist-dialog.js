@@ -4,8 +4,9 @@
 //   const item = await openWatchlistDialog({ entity_type: 'track', entity_id: t.id, entity_name: t.name });
 //
 // entity_type: 'track' | 'artist' | 'album'; entity_id: Spotify id (optional); entity_name: required.
-// Optional display-only extras: subtitle (the artist for a track or album — shown as "by X"; any other
-// text for an artist) and image (art url).
+// Optional extras: subtitle (the artist for a track or album — shown as "by X" and saved with the
+// item, so one without a Spotify id can still be played and linked; any other text for an artist,
+// display only) and image (art url, display only).
 // Resolves to the saved item, or null when the dialog was dismissed or saving failed (a toast says why).
 // Fires a window 'app:watchlist-changed' event ({detail: {item}}) after a save so open lists can refresh.
 import { api, isAbort } from '../core/api.js';
@@ -53,6 +54,8 @@ export async function openWatchlistDialog({ entity_type = 'track', entity_id = n
   const selected = new Set();
   let sub = String(subtitle || '').trim();
   if (sub.toLowerCase() === KIND_LABEL[type].toLowerCase()) sub = '';   // "Artist · Artist"
+  // For a track or album the subtitle is its artist: saved with the item, not just shown.
+  const artistName = type !== 'artist' && sub ? sub.replace(/^by\s+/i, '').trim() : '';
   if (sub && type !== 'artist' && !/^by\s/i.test(sub)) sub = `by ${sub}`;
   // An artist without a photo gets the same initials avatar as on every other page.
   const art = type === 'artist' ? artistThumb(image, name, { size: 48 }) : thumb(image, { iconName: KIND_ICON[type], size: 48 });
@@ -146,6 +149,7 @@ export async function openWatchlistDialog({ entity_type = 'track', entity_id = n
           entity_type: type,
           entity_id: entity_id || undefined,
           entity_name: name,
+          artist_name: artistName || undefined,
           reasons: [...selected],
           note: noteText || undefined,
         });

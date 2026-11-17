@@ -109,8 +109,20 @@ def artist_stats(name):
         _core()._log_app_error(e, "api_v2_artist_stats")
         return api_error("artist_stats_failed", "Could not compute this artist's stats.", 500)
     out = AS.public_profile(profile)
+    _attach_top_art(conn, out)
     out["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
     return jsonify(out)
+
+
+def _attach_top_art(conn, out):
+    """Cover art for the top tracks and albums, from art the app already stored (like the
+    Insights top lists): no Spotify call. Rows are copied, so the cached profile stays as is."""
+    from src.services.reports import local_art
+    tracks = out.get("top_tracks") or []
+    albums = out.get("top_albums") or []
+    songs, album_art = local_art(conn, [t.get("song_key") for t in tracks], [a.get("album_key") for a in albums])
+    out["top_tracks"] = [dict(t, image=songs.get(t.get("song_key"))) for t in tracks]
+    out["top_albums"] = [dict(a, image=album_art.get(a.get("album_key"))) for a in albums]
 
 
 @bp.route("/api/v2/artists")

@@ -47,6 +47,35 @@ def _row_to_dict(row) -> dict:
     return d
 
 
+def _ensure_artist_column(conn) -> bool:
+    """Older databases lack interests.artist_name (the artist of a saved track or album).
+
+    Added lazily and additively (a nullable column), so no migration step or backup is needed.
+    Returns whether the column exists (a locked DB only costs the artist line).
+    """
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(interests)").fetchall()}
+        if cols and "artist_name" not in cols:
+            conn.execute("ALTER TABLE interests ADD COLUMN artist_name TEXT")
+            conn.commit()
+            return True
+        return "artist_name" in cols
+    except Exception:
+        return False
+
+
+def _clean_artist(entity_type, artist_name):
+    """The artist of a track or album (None for artists or when not given)."""
+    if entity_type == "artist" or artist_name is None:
+        return None
+    if not isinstance(artist_name, str):
+        raise ValueError("artist_name must be a string")
+    artist_name = artist_name.strip()
+    if artist_name.lower().startswith("by "):
+        artist_name = artist_name[3:].strip()
+    return artist_name[:200] or None
+
+
 # ---------------------------------------------------------------------------
 # Write
 # ---------------------------------------------------------------------------
@@ -81,13 +110,17 @@ def add_interest(
     entity_id: str = None,
     reasons: list = None,
     note: str = None,
+    artist_name: str = None,
 ) -> int:
     """
     Create a new research interest. Returns the interest id.
     entity_type: 'track' | 'artist' | 'album'
+    artist_name: who made the track or album (kept so an item without a Spotify id can still
+    be played and linked to its artist; ignored for artists).
 
     Adding something that is already an *active* interest returns the existing row
-    (with any new reason tags merged in) instead of creating a duplicate.
+    (with any new reason tags merged in) instead of creating a duplicate. Without an id, the
+    same name by a different artist is a different item ("Intro" by two bands).
     """
     if entity_type not in ("track", "artist", "album"):
         raise ValueError(f"Invalid entity_type: {entity_type}")
@@ -96,10 +129,12 @@ def add_interest(
     entity_name = entity_name.strip()
     tags = _clean_reasons(reasons)
     note = _clean_note(note)
+    artist = _clean_artist(entity_type, artist_name)
 
     now = _now_ms()
     conn = get_conn()
     conn.commit()
+    _ensure_artist_column(conn)
     with conn:  # one transaction: commits on success, rolls back on any error
         if entity_id:
             existing = conn.execute(
@@ -107,12 +142,19 @@ def add_interest(
                 "ORDER BY id LIMIT 1", (entity_type, entity_id),
             ).fetchone()
         else:
+            # An older row saved without an artist still matches (it is the same item, now known better).
             existing = conn.execute(
                 "SELECT id FROM interests WHERE status = 'active' AND entity_type = ? AND entity_id IS NULL "
-                "AND lower(entity_name) = lower(?) ORDER BY id LIMIT 1", (entity_type, entity_name),
+                "AND lower(entity_name) = lower(?) "
+                "AND (artist_name IS NULL OR ? IS NULL OR lower(artist_name) = lower(?)) "
+                "ORDER BY (artist_name IS NULL), id LIMIT 1",
+                (entity_type, entity_name, artist, artist),
             ).fetchone()
         if existing:
             interest_id = existing[0]
+            if artist:
+                conn.execute("UPDATE interests SET artist_name = ? WHERE id = ? AND artist_name IS NULL",
+                             (artist, interest_id))
             have = {r[0] for r in conn.execute(
                 "SELECT tag FROM interest_reasons WHERE interest_id = ?", (interest_id,))}
             for tag in tags:
@@ -125,10 +167,10 @@ def add_interest(
         cur = conn.execute(
             """
             INSERT INTO interests
-                (entity_type, entity_id, entity_name, status, note, created_at, updated_at)
-            VALUES (?, ?, ?, 'active', ?, ?, ?)
+                (entity_type, entity_id, entity_name, artist_name, status, note, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
             """,
-            (entity_type, entity_id or None, entity_name, note, now, now),
+            (entity_type, entity_id or None, entity_name, artist, note, now, now),
         )
         interest_id = cur.lastrowid
         for tag in tags:
@@ -222,9 +264,10 @@ def get_interests(status: str = None, entity_type: str = None, limit: int = 200)
         where.append("entity_type = ?")
         params.append(entity_type)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
+    artist_col = "artist_name" if _ensure_artist_column(conn) else "NULL AS artist_name"
     rows = conn.execute(
         f"""
-        SELECT id, entity_type, entity_id, entity_name, status, note,
+        SELECT id, entity_type, entity_id, entity_name, {artist_col}, status, note,
                created_at, updated_at
         FROM interests
         {clause}
@@ -239,9 +282,10 @@ def get_interests(status: str = None, entity_type: str = None, limit: int = 200)
 
 def get_interest(interest_id: int) -> Optional[dict]:
     conn = get_conn()
+    artist_col = "artist_name" if _ensure_artist_column(conn) else "NULL AS artist_name"
     row = conn.execute(
-        """
-        SELECT id, entity_type, entity_id, entity_name, status, note,
+        f"""
+        SELECT id, entity_type, entity_id, entity_name, {artist_col}, status, note,
                created_at, updated_at
         FROM interests WHERE id = ?
         """,

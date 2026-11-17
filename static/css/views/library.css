@@ -70,6 +70,12 @@
 
 /* notices */
 .lib-notice { margin-bottom: var(--sp-4); }
+/* Liked: paging footer ("Showing 50 of 1,234 · Load 50 more · Load all") */
+.lib-more { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2) var(--sp-4); margin-top: var(--sp-3); padding: var(--sp-3) var(--sp-2) 0; border-top: 1px solid var(--border); }
+.lib-more-text { margin: 0; color: var(--text-2); font-size: var(--fs-13); }
+.lib-more-error { margin: 0; flex-basis: 100%; color: var(--warning-text, var(--text)); font-size: var(--fs-13); }
+.lib-more-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.lib-more-busy { display: inline-flex; align-items: center; gap: 8px; color: var(--text-2); font-size: var(--fs-13); }
 .lib-notice .meter { max-width: 360px; margin-top: 8px; }
 
 /* ======================================================================= Recent plays */

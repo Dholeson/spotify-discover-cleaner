@@ -10,6 +10,9 @@ import { playUri } from './player.js';
 
 const DEBOUNCE_MS = 250;
 const MIN_CHARS = 2;
+// Narrow top bars cut the long placeholder off ("Search artists, song"): use one word there.
+const NARROW_QUERY = '(max-width: 560px)';
+const SHORT_PLACEHOLDER = 'Search';
 
 let input;
 let panel;
@@ -37,6 +40,7 @@ function close({ clear = false } = {}) {
   if (clear) {
     input.value = '';
     syncClear();
+    debounced.cancel();   // a search still waiting to run must not reopen the panel
     abort();
     state = null;
     mount(panel, '');
@@ -55,6 +59,7 @@ function syncClear() {
 
 // ======================================================================= fetching
 async function runSearch(q) {
+  if (input.value.trim() !== q) return;   // the box changed (or was cleared) while this waited
   abort();
   const mySeq = ++seq;
   ctrl = new AbortController();
@@ -293,6 +298,28 @@ export function initSearch(root) {
     if (i !== activeIdx) { activeIdx = i; syncActive(); }
   });
   clearBtn?.addEventListener('click', () => { close({ clear: true }); input.focus(); });
+  // The box belongs to the page you searched from: leaving it clears the query, and the
+  // search page keeps the box in sync with its ?q= (back/forward included).
+  const syncToRoute = (route) => {
+    if (route?.id === 'search') {
+      const q = String(route.query?.q || '');
+      if (document.activeElement !== input && input.value !== q) {
+        input.value = q;
+        state = null;
+        close();
+        syncClear();
+      }
+    } else if (document.activeElement !== input && input.value) {
+      close({ clear: true });
+    }
+  };
+  router.onChange((route) => syncToRoute(route));
+  syncToRoute(router.current());
+  const longPlaceholder = input.getAttribute('placeholder') || '';
+  const mq = window.matchMedia ? window.matchMedia(NARROW_QUERY) : null;
+  const fitPlaceholder = () => { input.setAttribute('placeholder', mq?.matches ? SHORT_PLACEHOLDER : longPlaceholder); };
+  fitPlaceholder();
+  mq?.addEventListener?.('change', fitPlaceholder);
   document.addEventListener('pointerdown', (ev) => {
     if (isOpen() && !root.contains(ev.target)) close();
   });

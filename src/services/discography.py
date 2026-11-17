@@ -121,7 +121,9 @@ def fetch_artist_albums(sp, artist_id: str,
     """
     albums = []
     offset = 0
-    limit = 20   # Spotify max is 50 but some spotipy versions choke at that
+    # 10 per page: Spotify answers larger pages with 400 "Invalid limit" for some apps (seen
+    # with Development Mode apps); 10 is accepted everywhere. Pages are cached by the guard.
+    limit = 10
     # Spotify's include_groups does not support "ep"; EPs come back under album/single
     # and are classified locally.
     valid_groups = []
@@ -134,21 +136,9 @@ def fetch_artist_albums(sp, artist_id: str,
     include_groups = ",".join(valid_groups or ["album", "single", "compilation"])
 
     while True:
-        try:
-            # Bypass spotipy.artist_albums() here because this spotipy build
-            # always injects country=None into the request params, and Spotify
-            # rejects that for this endpoint with a misleading "Invalid limit".
-            page = sp._get(
-                f"artists/{artist_id}/albums",
-                include_groups=include_groups,
-                limit=limit,
-                offset=offset,
-            )
-        except Exception as _e:
-            if "400" in str(_e) and limit > 10:
-                limit = 10   # fall back to smaller page on Bad Request
-                continue
-            raise
+        # spotipy's artist_albums (not a raw _get): it goes through the guard's artist_albums
+        # policy (budget + 2-day cache), and requests drops its country=None parameter.
+        page = sp.artist_albums(artist_id, include_groups=include_groups, limit=limit, offset=offset)
         items = (page or {}).get('items') or []
         albums.extend(items)
         if len(items) < limit or not (page or {}).get('next'):

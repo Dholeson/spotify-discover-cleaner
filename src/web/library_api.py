@@ -188,6 +188,8 @@ def _track_details(conn, item, backlog_entry, backlog_contains, ledger):
             out["album"] = out.get("album") or entry.get("album") or None
             out["image"] = out.get("image") or entry.get("image")
         out["in_backlog"] = backlog_contains(tid) is True
+    if not out.get("artist") and item.get("artist_name"):
+        out["artist"] = item["artist_name"]   # saved without a Spotify id: the artist it was saved with
     if not ledger:
         return out
     song_key = None
@@ -204,6 +206,9 @@ def _track_details(conn, item, backlog_entry, backlog_contains, ledger):
         song_key = AS.song_key_for(out["artist"], item.get("entity_name") or "")
     if song_key:
         out.update(_play_window(conn, "song_key = ?", [song_key], since))
+        if not out.get("image"):
+            from src.services.reports import local_art
+            out["image"] = local_art(conn, [song_key])[0].get(song_key)
     return out
 
 
@@ -227,13 +232,23 @@ def _album_details(conn, item, ledger):
             out["image"] = row[0]
     except sqlite3.Error:
         pass
+    saved_artist = item.get("artist_name")
+    if saved_artist:
+        out["artist"] = saved_artist
     if not ledger:
         return out
-    row = conn.execute(
-        "SELECT artist_name, COUNT(*) AS n FROM plays WHERE album_name = ? COLLATE NOCASE AND superseded_by IS NULL "
-        "GROUP BY artist_key ORDER BY n DESC LIMIT 1", (name,)).fetchone()
+    from src.services import artist_stats as AS
+    if saved_artist:
+        # the album by the artist it was saved with (two bands can share an album title)
+        row = conn.execute(
+            "SELECT artist_name, COUNT(*) AS n FROM plays WHERE album_name = ? COLLATE NOCASE AND artist_key = ? "
+            "AND superseded_by IS NULL GROUP BY artist_key", (name, AS.artist_key(saved_artist))).fetchone()
+        row = row or (saved_artist, 0)
+    else:
+        row = conn.execute(
+            "SELECT artist_name, COUNT(*) AS n FROM plays WHERE album_name = ? COLLATE NOCASE AND superseded_by IS NULL "
+            "GROUP BY artist_key ORDER BY n DESC LIMIT 1", (name,)).fetchone()
     if row:
-        from src.services import artist_stats as AS
         out["artist"] = row[0]
         out.update(_play_window(conn, "album_name = ? COLLATE NOCASE AND artist_key = ?",
                                 [name, AS.artist_key(row[0])], int(item.get("created_at") or 0)))

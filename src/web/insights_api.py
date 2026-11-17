@@ -122,7 +122,8 @@ def today_status():
             track = core.state.get("current_track") or {}
             tid = track.get("id") if isinstance(track, dict) else None
             listened = float(core.state.get("current_listened") or 0.0)
-        min_s = float(getattr(core, "LISTEN_EVENT_MIN_SECONDS", 10.0))
+        # the playing track counts as heard by the same rule as a logged play (30 s)
+        min_s = max(float(getattr(core, "LISTEN_EVENT_MIN_SECONDS", 10.0)), _reports.HEARD_MIN_S)
         now = time.time()
         now_ms = int(now * 1000)
         day = _reports.local_day(now_ms).isoformat()

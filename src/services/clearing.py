@@ -306,7 +306,10 @@ class RecentlyCleared:
         self._seq = itertools.count(int(seq_start if seq_start is not None else time.time()))
 
     def add(self, *, track_id, uri=None, name="", artists="", artist_list=None, image=None,
-            reason="manual", listened_s=None, position=None, playlist_id=None, ts_ms=None):
+            reason="manual", listened_s=None, position=None, playlist_id=None, ts_ms=None,
+            added_at=None, album=None, album_id=None, duration_ms=None):
+        """added_at/album/album_id/duration_ms describe the backlog entry before the clear, so
+        Undo can put back the same entry (Spotify stamps a re-added item with the current time)."""
         ts = int(ts_ms if ts_ms is not None else self._clock_ms())
         entry = {
             "seq": next(self._seq),
@@ -322,6 +325,10 @@ class RecentlyCleared:
             "ts_ms": ts,
             "position": position,
             "playlist_id": playlist_id,
+            "added_at": added_at or None,
+            "album": album or "",
+            "album_id": album_id or None,
+            "duration_ms": int(duration_ms or 0),
             "undone": False,
             "undo_expires_ms": ts + self._undo_window_ms,
         }
@@ -354,6 +361,99 @@ class RecentlyCleared:
                 if e["track_id"] == track_id:
                     return dict(e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Original "added" dates of tracks brought back with Undo
+# ---------------------------------------------------------------------------
+
+RESTORED_DATES_META_KEY = "restored_added_at"
+MAX_RESTORED_DATES = 500
+RESTORE_MATCH_MS = 15 * 60 * 1000   # Spotify's stamp on the re-added item is within minutes of the undo
+
+
+class RestoredDates:
+    """When Undo puts a track back, Spotify stamps the re-added item with the current time. The
+    listener asked for the clear to be undone, so lists show the date it was *first* added.
+
+    Each entry is {added_at, restored_ms}: the original date applies only to the copy Undo added
+    (an ``added_at`` within RESTORE_MATCH_MS of the restore), never to a later, separate add.
+    The index itself keeps Spotify's stamp (catch-up relies on it: plays before a restore must
+    not count as "heard since added"). Persisted in app_meta when a connection factory is given.
+    """
+
+    def __init__(self, conn_factory=None, clock_ms=_now_ms):
+        self._conn_factory = conn_factory
+        self._clock_ms = clock_ms
+        self._lock = threading.Lock()
+        self._map = None
+
+    def _load(self):
+        if self._map is not None:
+            return self._map
+        self._map = {}
+        if self._conn_factory is not None:
+            try:
+                conn = self._conn_factory()
+                conn.execute("CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                row = conn.execute("SELECT value FROM app_meta WHERE key = ?", (RESTORED_DATES_META_KEY,)).fetchone()
+                data = json.loads(row[0]) if row else {}
+                if isinstance(data, dict):
+                    self._map = {k: v for k, v in data.items()
+                                 if isinstance(v, dict) and isinstance(v.get("added_at"), str)}
+            except Exception:
+                log.exception("restored dates unavailable")
+        return self._map
+
+    def _save(self):
+        if self._conn_factory is None:
+            return
+        try:
+            conn = self._conn_factory()
+            conn.execute("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
+                         (RESTORED_DATES_META_KEY, json.dumps(self._map, separators=(",", ":"))))
+            conn.commit()
+        except Exception:
+            log.exception("restored dates not saved")
+
+    def remember(self, track_id, added_at, restored_ms=None):
+        if not track_id or not isinstance(added_at, str) or not added_at:
+            return
+        with self._lock:
+            m = self._load()
+            m.pop(track_id, None)   # re-insert: newest last, so trimming drops the oldest
+            m[track_id] = {"added_at": added_at,
+                           "restored_ms": int(restored_ms if restored_ms is not None else self._clock_ms())}
+            while len(m) > MAX_RESTORED_DATES:
+                m.pop(next(iter(m)))
+            self._save()
+
+    def display_added_at(self, track_id, added_at):
+        """The date to show for an index entry: the original one for the copy Undo put back."""
+        if not track_id:
+            return added_at
+        with self._lock:
+            rec = self._load().get(track_id)
+        if not rec:
+            return added_at
+        stamp = _iso_ms(added_at)
+        if stamp is None or abs(stamp - int(rec.get("restored_ms") or 0)) > RESTORE_MATCH_MS:
+            return added_at
+        return rec["added_at"]
+
+
+def _iso_ms(value):
+    """Epoch ms of an ISO-8601 UTC timestamp ('2026-09-25T10:00:00Z'), else None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    from datetime import datetime
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return int(dt.timestamp() * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -590,7 +690,7 @@ class ClearingEngine:
     """Owns the per-play clearing state shared by the poll loop and the HTTP routes."""
 
     def __init__(self, index, pending=None, recent=None, poll_interval_s=3.0, auto_clean_enabled=True,
-                 listen_min_s=10.0):
+                 listen_min_s=10.0, restored_dates=None):
         self.index = index
         self.pending = pending
         self.recent = recent or RecentlyCleared()
@@ -602,6 +702,10 @@ class ClearingEngine:
         self.kept_reason = None
         # Tracks kept during this session (id -> ms), so catch-up doesn't propose them.
         self._kept_ids = {}
+        # Plays that passed the threshold while auto-clear was paused (id -> ms). Now told the
+        # listener "this track stays", so catch-up must not propose them either.
+        self._heard_paused_ids = {}
+        self.restored_dates = restored_dates if restored_dates is not None else RestoredDates()
         self.auto_clean_enabled = bool(auto_clean_enabled)
 
     # ----- poll-loop plumbing -----
@@ -634,7 +738,7 @@ class ClearingEngine:
     def fate(self, track_id, *, threshold_s, duration_ms=0, listened_s=0.0, extra_s=0.0):
         play = self.tracker.play
         membership = self._membership(track_id) if track_id else False
-        return compute_fate(
+        fate = compute_fate(
             track_id,
             play=play,
             membership=membership,
@@ -647,6 +751,23 @@ class ClearingEngine:
             listened_s=listened_s,
             extra_s=extra_s,
         )
+        if (fate["state"] == "clearing_paused" and play is not None and play.track_id == track_id
+                and float(listened_s or 0.0) >= effective_threshold(threshold_s, duration_ms)):
+            self._remember_heard_paused(track_id)
+        return fate
+
+    def _remember_heard_paused(self, track_id):
+        with self.lock:
+            if track_id in self._heard_paused_ids:
+                return
+            self._heard_paused_ids[track_id] = _now_ms()
+            if len(self._heard_paused_ids) > MAX_KEPT_MEMORY:
+                self._heard_paused_ids.pop(next(iter(self._heard_paused_ids)))
+
+    def heard_while_paused(self, track_id):
+        """True when this session saw the track pass the threshold while auto-clear was paused."""
+        with self.lock:
+            return track_id in self._heard_paused_ids
 
     @staticmethod
     def auto_clear_allowed(play):
@@ -745,6 +866,11 @@ class ClearingEngine:
                     listened_s=listened,
                     position=positions.get(tid),
                     playlist_id=pid,
+                    # the backlog entry as it was, so Undo can put the same entry back
+                    added_at=meta.get("added_at"),
+                    album=meta.get("album") or (t.get("album") if isinstance(t.get("album"), str) else ""),
+                    album_id=meta.get("album_id") or t.get("album_id"),
+                    duration_ms=meta.get("duration_ms") or t.get("duration_ms"),
                 )
                 out.append(entry)
                 try:
@@ -894,13 +1020,20 @@ class ClearingEngine:
                     pass
                 idx_entry = {
                     # Spotify stamps a re-added item with the current time; catch-up relies on it.
+                    # Lists show the original date instead (restored_dates).
                     "track_id": entry["track_id"], "uri": uri,
                     "added_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now / 1000.0)),
                     "name": entry.get("name") or "", "artists": entry.get("artists") or "",
-                    "artist_list": entry.get("artist_list") or [], "album": "", "album_id": None,
-                    "image": entry.get("image"), "duration_ms": 0, "is_local": False,
+                    "artist_list": entry.get("artist_list") or [], "album": entry.get("album") or "",
+                    "album_id": entry.get("album_id"), "image": entry.get("image"),
+                    "duration_ms": int(entry.get("duration_ms") or 0), "is_local": False,
                 }
                 self.index.apply_add(idx_entry, position, playlist_id=pid)
+                if entry.get("added_at"):
+                    try:
+                        self.restored_dates.remember(entry["track_id"], entry["added_at"], now)
+                    except Exception as e:
+                        _log_quietly(core, e, "restored dates")
             restored = self.recent.mark_undone(seq) or dict(entry, undone=True)
             restored_track = {
                 "id": entry["track_id"], "name": entry.get("name"), "artists": entry.get("artists"),
@@ -946,6 +1079,8 @@ class ClearingEngine:
                     self._kept_ids[track_id] = _now_ms()
                     if len(self._kept_ids) > MAX_KEPT_MEMORY:
                         self._kept_ids.pop(next(iter(self._kept_ids)))
+                elif reason == "auto_clean_resumed":
+                    self._remember_heard_paused(track_id)
                 if self.pending is not None and self.pending.cancel(track_id, ("threshold",)) and is_play:
                     p.removal_queued = False
                 elif is_play and p.removal_queued and track_id not in self.pending_ids():
@@ -1044,8 +1179,10 @@ def get_engine():
             import app as core
             from src.services import backlog_index
             pending = None
+            restored = RestoredDates()
             if getattr(core, "_SQLITE_ENABLED", False):
                 pending = PendingRemovals(core._db.get_conn)
+                restored = RestoredDates(core._db.get_conn)
             cfg = getattr(core, "_initial_cfg", None) or {}
             _ENGINE = ClearingEngine(
                 backlog_index.get_index(),
@@ -1053,5 +1190,6 @@ def get_engine():
                 poll_interval_s=getattr(core, "POLL_INTERVAL", 3.0),
                 auto_clean_enabled=cfg.get("auto_clean_enabled", True) is not False,
                 listen_min_s=getattr(core, "LISTEN_EVENT_MIN_SECONDS", 10.0),
+                restored_dates=restored,
             )
     return _ENGINE

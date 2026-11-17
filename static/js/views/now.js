@@ -36,7 +36,7 @@ const BACKLOG_INSIGHTS_HREF = '#/insights/backlog';
 const DEF = {
   plays_today: 'Plays in your listening history since midnight: Last.fm scrobbles plus plays this app recorded. Hidden (non-music) artists are left out.',
   cleared_today: "Different tracks removed from your backlog since midnight: automatically after the listen threshold, with Clear now, Like, or catch-up. Clears you undid don't count.",
-  heard_in_app: 'Different tracks this app saw you play since midnight. The track playing now counts once it has played for 10 seconds.',
+  heard_in_app: "Different tracks this app saw you play for 30 seconds or more since midnight, the same rule that makes a play count. Quick skips aren't counted. The track playing now counts once it reaches 30 seconds.",
   liked_today: 'Tracks you saved to Liked Songs from this app since midnight.',
   backlog_total: 'Tracks in your backlog playlist right now. It shrinks as tracks are cleared and grows when you add tracks in Spotify.',
   artist_plays: 'Every play of this artist in your history: Last.fm scrobbles plus plays this app recorded.',
@@ -258,8 +258,17 @@ function fateMarkup(m, s) {
     }
     case 'kept':
       ring = ringMarkup('kept', 1, icon('keep'));
-      title = 'Keeping this one in your backlog';
-      sub = "It won't be cleared during this play. It can still clear the next time it plays.";
+      if (f.reason === 'auto_clean_resumed') {
+        // The listener pressed Resume, not Keep: say why this play stays.
+        title = 'Auto-clear is back on';
+        sub = html`This play passed ${secs(thr)} while auto-clear was paused, so it stays in ${pl}. It can clear the next time it plays.`;
+      } else if (f.reason === 'added_during_play') {
+        title = 'Added to your backlog during this play';
+        sub = "Only tracks already in the backlog when they start are cleared, so this one stays for now. It can clear the next time it plays.";
+      } else {
+        title = 'Keeping this one in your backlog';
+        sub = "It won't be cleared during this play. It can still clear the next time it plays.";
+      }
       cta = html`<button type="button" class="btn btn-secondary btn-sm" data-now="clear-anyway" data-tip="Remove it from your backlog now and keep listening">Clear anyway</button>`;
       break;
     case 'clearing_paused':
@@ -305,9 +314,10 @@ function actionsMarkup(m) {
   const keepOn = kept || st === 'in_backlog';
   const clearOn = m.inBacklog;
   const pl = plName(m.playlistName);
-  const likeLabel = m.inBacklog ? 'Like & clear' : m.liked ? 'Liked' : 'Like';
+  // Already liked + in the backlog: the button only clears, so it must not promise a like.
+  const likeLabel = m.inBacklog ? (m.liked ? 'Liked · Clear' : 'Like & clear') : m.liked ? 'Liked' : 'Like';
   const likeTip = m.inBacklog
-    ? `Save to Liked Songs and clear it from ${pl} (L)`
+    ? (m.liked ? `Already in your Liked Songs: this clears it from ${pl} (L)` : `Save to Liked Songs and clear it from ${pl} (L)`)
     : m.liked ? 'Already in your Liked Songs' : 'Save to your Liked Songs (L)';
   const keepTip = kept
     ? 'Kept for this play. Press again to let it clear as usual (K)'
@@ -317,7 +327,8 @@ function actionsMarkup(m) {
     ? `Remove it from ${pl} now and skip to the next track (C)`
     : st === 'syncing' ? 'Available once your backlog has loaded' : st === 'cleared' ? 'Already cleared' : 'This track is not in your backlog';
   let note;
-  if (m.inBacklog) note = html`<strong>Like</strong> saves it to Liked Songs and clears it from your backlog. <strong>Clear now</strong> removes it and plays the next track.`;
+  if (m.inBacklog && m.liked) note = html`It's already in your Liked Songs. <strong>Liked · Clear</strong> only removes it from your backlog; <strong>Clear now</strong> also plays the next track.`;
+  else if (m.inBacklog) note = html`<strong>Like</strong> saves it to Liked Songs and clears it from your backlog. <strong>Clear now</strong> removes it and plays the next track.`;
   else if (st === 'syncing') note = 'Keep and Clear now work once your backlog has finished loading.';
   else note = m.liked ? 'This track is in your Liked Songs.' : html`<strong>Like</strong> saves it to your Liked Songs.`;
   const dis = (on) => (on ? '' : raw(' aria-disabled="true"'));
@@ -1112,11 +1123,12 @@ function flowCell(label, value, tone, sr) {
   </div>`;
 }
 
+// Counts are plain numbers (as on Insights); only the net change carries a sign and a colour.
 function flowCells(cleared, added, net) {
   const netTone = net > 0 ? 'delta-down' : net < 0 ? 'delta-up' : 'delta-flat';
   return html`
-    ${flowCell('Cleared', cleared ? `−${fmt.num(cleared)}` : '0', cleared ? 'delta-up' : 'delta-flat', 'removed')}
-    ${flowCell('Added', added ? `+${fmt.num(added)}` : '0', 'delta-flat', 'added')}
+    ${flowCell('Cleared', fmt.num(cleared || 0), '', '')}
+    ${flowCell('Added', fmt.num(added || 0), '', '')}
     ${flowCell('Net change', fmt.signed(net), netTone, net > 0 ? 'grew by' : net < 0 ? 'shrank by' : '')}`;
 }
 
@@ -1146,7 +1158,7 @@ function windowMarkup(ins) {
   const mz = w.measured;
   const mKnown = mz && isNum(mz.inflow) && isNum(mz.net) && mz.start_day;
   return html`<div class="bl-window">${head}
-    <dl class="bl-flow bl-flow-single">${flowCell('Cleared', num(w.cleared) ? `−${fmt.num(w.cleared)}` : '0', num(w.cleared) ? 'delta-up' : 'delta-flat', 'removed')}</dl>
+    <dl class="bl-flow bl-flow-single">${flowCell('Cleared', fmt.num(num(w.cleared)), '', '')}</dl>
     <p class="bl-window-note">Added and net change for these ${fmt.plural(days, 'day')} aren't known: the app wasn't running on ${fmt.date(w.requested_start_day || w.start_day)} to record the backlog size.</p>
     ${mKnown ? html`<div class="bl-measured">
       <div class="bl-window-head"><h3 class="now-subhead">Since ${fmt.date(mz.start_day)}</h3><span class="bl-measured-days">${fmt.plural(num(mz.days), 'day')}</span></div>

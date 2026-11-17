@@ -53,7 +53,21 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 # ---------- Config ----------
-load_dotenv(Path(__file__).parent / ".env")
+APP_DIR = Path(os.path.abspath(__file__)).parent
+# `python app.py --demo` (or DISCOVER_DEMO=1): the offline demo. Simulated Spotify, the bundled
+# listening history, and its own data folder (.demo-data/, or DISCOVER_DEMO_DIR). Decided before
+# anything reads a path or a setting, so the demo can never touch a real install's files.
+DEMO_MODE = (__name__ == "__main__" and "--demo" in sys.argv[1:]) or os.environ.get("DISCOVER_DEMO") == "1"
+if DEMO_MODE:
+    os.environ["DISCOVER_DEMO"] = "1"  # inherited by the reloader's child process
+    os.environ["DISCOVER_DATA_DIR"] = os.environ.get("DISCOVER_DEMO_DIR") or str(APP_DIR / ".demo-data")
+    for _k in ("SPOTIPY_CLIENT_ID", "SPOTIPY_CLIENT_SECRET", "SPOTIPY_REDIRECT_URI", "PLAYLIST_ID", "LASTFM_USERNAME"):
+        os.environ.pop(_k, None)
+    os.environ["LASTFM_AUTO_SYNC"] = "0"
+    Path(os.environ["DISCOVER_DATA_DIR"]).mkdir(parents=True, exist_ok=True)
+    load_dotenv(Path(os.environ["DISCOVER_DATA_DIR"]) / ".env")  # the demo's own settings, if any
+else:
+    load_dotenv(APP_DIR / ".env")
 
 import json
 
@@ -70,6 +84,15 @@ except Exception as _sqlite_import_err:  # pragma: no cover
         "SQLite persistence unavailable: %s", _sqlite_import_err
     )
     _SQLITE_ENABLED = False
+
+# Database, .config.json, the Spotify token cache and backups live in DATA_DIR
+# (DISCOVER_DATA_DIR; default: this folder). .env stays next to app.py (the demo keeps its own).
+DATA_DIR = _db.DATA_DIR if _SQLITE_ENABLED else APP_DIR
+if DEMO_MODE:
+    from src.devtools import demo as _demo
+    # Blocks *.spotify.com for this process and seeds DATA_DIR from demo/snapshot/ when it is
+    # empty (or on --demo --reset), before .config.json is read below.
+    _demo.prepare(DATA_DIR, reset=("--reset" in sys.argv[1:] and os.environ.get("WERKZEUG_RUN_MAIN") != "true"))
 
 import copy
 import html
@@ -124,8 +147,8 @@ MAX_BACKLOG_HISTORY = _env_num("MAX_BACKLOG_HISTORY", 180, int, 10, 10000)
 LIKED_LIBRARY_SAMPLE_LIMIT = _env_num("LIKED_LIBRARY_SAMPLE_LIMIT", 0, int, 0, 100000)
 LIKED_LIBRARY_PROFILE_TTL_S = _env_num("LIKED_LIBRARY_PROFILE_TTL_S", 12 * 3600, int, 60, 30 * 86400)
 ANALYTICS_WINDOW_DAYS = _env_num("ANALYTICS_WINDOW_DAYS", 14, int, 1, 365)
-CONFIG_PATH = Path(__file__).parent / ".config.json"
-ENV_PATH = Path(__file__).parent / ".env"
+CONFIG_PATH = DATA_DIR / ".config.json"
+ENV_PATH = (DATA_DIR if DEMO_MODE else APP_DIR) / ".env"
 
 # Settings exposed in the UI for editing. Updates write to .env and require a
 # restart for most fields (since module-level constants only read on startup).
@@ -425,9 +448,22 @@ SCOPE = (
     "playlist-read-collaborative"
 )
 
-CACHE_PATH = str(Path(__file__).parent / ".spotify_cache")
+CACHE_PATH = str(DATA_DIR / ".spotify_cache")
 LRCLIB_BASE = "https://lrclib.net/api/get"
-LRCLIB_UA = "SpotifyDiscoverCleaner/0.3 (https://github.com/local)"
+LRCLIB_UA = "SpotifyDiscoverCleaner/0.3 (https://github.com/Dholeson/spotify-discover-cleaner)"
+SERVER_PORT = 8888  # main() sets the port actually served (--port)
+
+
+def spotify_credentials_configured():
+    """True once a Spotify app's Client ID and Secret are set (.env or environment)."""
+    return bool((os.environ.get("SPOTIPY_CLIENT_ID") or "").strip()
+                and (os.environ.get("SPOTIPY_CLIENT_SECRET") or "").strip())
+
+
+def spotify_redirect_uri():
+    """The Redirect URI the Spotify app must list: SPOTIPY_REDIRECT_URI, else this server's."""
+    return (os.environ.get("SPOTIPY_REDIRECT_URI") or "").strip() or f"http://127.0.0.1:{SERVER_PORT}/callback"
+
 
 def clear_spotify_cache_file():
     try:
@@ -437,12 +473,18 @@ def clear_spotify_cache_file():
         return False, str(e)
 
 def build_oauth_manager():
-    """Build a Spotify OAuth manager from the current process environment."""
+    """Build a Spotify OAuth manager from the current process environment.
+
+    None until a Client ID and Secret are configured (first run shows the Setup screen
+    instead) and always in the offline demo, which never signs in to Spotify.
+    """
+    if DEMO_MODE or not spotify_credentials_configured():
+        return None
     from spotipy.cache_handler import CacheFileHandler
     return SpotifyOAuth(
         client_id=os.environ.get("SPOTIPY_CLIENT_ID"),
         client_secret=os.environ.get("SPOTIPY_CLIENT_SECRET"),
-        redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
+        redirect_uri=spotify_redirect_uri(),
         scope=SCOPE,
         cache_handler=CacheFileHandler(cache_path=CACHE_PATH),
         open_browser=False,
@@ -619,6 +661,9 @@ def get_cached_token():
         tok = _token_mem
         if _token_usable(tok):
             return tok  # another thread refreshed while we waited
+        if _oauth is None:  # no Spotify app configured yet (first run)
+            _token_mem = None
+            return None
         try:
             token_info = _oauth.cache_handler.get_cached_token()
             if not token_info:
@@ -824,7 +869,23 @@ def is_spotify_app_registration_error(exc):
     if getattr(exc, "http_status", None) != 403:
         return False
     msg = str(exc).lower()
-    return "not registered for this application" in msg
+    # Spotify has worded this as "...not registered for this application" and as "Check settings
+    # on developer.spotify.com/dashboard, the user may not be registered." (Development Mode
+    # allowlist). A removed endpoint's 403 says neither. Since 2026 Spotify also answers 403
+    # "Active premium subscription required for the owner of the app" when the account that
+    # created the developer app has no Premium: every call fails the same way, so it is paused alike.
+    return ("not registered for this application" in msg or "may not be registered" in msg
+            or "premium subscription required" in msg)
+
+
+def spotify_app_access_message(detail):
+    """Plain-language reason for an app-level 403 (see is_spotify_app_registration_error)."""
+    if "premium subscription required" in str(detail or "").lower():
+        return ("Spotify requires the account that created this Spotify app to have Premium. "
+                "Upgrade that account (or create the app with a Premium account and save its keys "
+                "in Settings), then sign in again.")
+    return ("Spotify rejected this account for the app. Add it under User Management "
+            "in the Spotify developer dashboard, then sign in again.")
 
 def _spotify_app_reg_block_remaining_s():
     with _SPOTIFY_GUARD_LOCK:
@@ -1658,6 +1719,22 @@ def _revalidate_restored_guard_state():
     threading.Thread(target=_worker, daemon=True).start()
 
 
+SPOTIFY_SEARCH_MAX_LIMIT = 10  # Development Mode apps created after 2026-02-11: 400 "Invalid limit" above
+
+
+def _spotify_clamp_search_limit(args, kwargs):
+    """search(q, limit=...) with limit capped at SPOTIFY_SEARCH_MAX_LIMIT (keyword or positional)."""
+    try:
+        if "limit" in kwargs:
+            if kwargs["limit"] is not None and int(kwargs["limit"]) > SPOTIFY_SEARCH_MAX_LIMIT:
+                kwargs = dict(kwargs, limit=SPOTIFY_SEARCH_MAX_LIMIT)
+        elif len(args) > 1 and args[1] is not None and int(args[1]) > SPOTIFY_SEARCH_MAX_LIMIT:
+            args = (args[0], SPOTIFY_SEARCH_MAX_LIMIT) + tuple(args[2:])
+    except (TypeError, ValueError):
+        pass
+    return args, kwargs
+
+
 class GuardedSpotify:
     def __init__(self, client):
         self._client = client
@@ -1668,6 +1745,8 @@ class GuardedSpotify:
             return attr
 
         def guarded(*args, **kwargs):
+            if name == "search":
+                args, kwargs = _spotify_clamp_search_limit(args, kwargs)
             cache_state, cached_value, cache_key, policy = _spotify_guard_preflight(name, args, kwargs)
             if cache_state == "fresh":
                 return cached_value
@@ -2591,6 +2670,19 @@ def _note_sp_search_rate_limit(exc):
     _sp_search_retry_after_s = retry_after
     _sp_search_backoff_until = max(_sp_search_backoff_until, time.monotonic() + max(0, retry_after))
 
+def _artist_name_key(name):
+    """The plays ledger's artist normalization (case, accents, 'The', '&'/'and' ...)."""
+    try:
+        from src.services import artist_stats as _AS
+        return _AS.artist_key(name or "")
+    except Exception:
+        return " ".join(str(name or "").casefold().split())
+
+def _pick_artist_by_name(items, name):
+    """The search result whose normalized name equals ``name``, else the first (Spotify's best)."""
+    want = _artist_name_key(name)
+    return next((a for a in items if _artist_name_key(a.get("name")) == want), items[0])
+
 def _spotify_search_artist_ex(sp, name):
     """spotify_search_artist() that also says whether the lookup was blocked (by the local
     guard or a search backoff) rather than genuinely finding nothing: (result, blocked)."""
@@ -2605,13 +2697,16 @@ def _spotify_search_artist_ex(sp, name):
         if _sp_search_rate_limited():
             return None, True
         _sp_search_throttle()
-        r = sp.search(q=f'artist:"{name}"', type="artist", limit=1)
-        items = ((r or {}).get("artists") or {}).get("items") or []
+        # Several candidates, then the one whose normalized name matches (the same rule as
+        # src/web/artist_api._resolve_artist): with limit=1 a co-credited or similarly named
+        # artist could win. 5 also stays inside the 2026 search cap of 10.
+        r = sp.search(q=f'artist:"{name}"', type="artist", limit=5)
+        items = [a for a in (((r or {}).get("artists") or {}).get("items") or []) if a and a.get("id")]
         if items:
-            a = items[0]
+            a = _pick_artist_by_name(items, name)
             result = {
                 "id": a["id"],
-                "name": a["name"],
+                "name": a.get("name") or name,
                 "url": (a.get("external_urls") or {}).get("spotify"),
                 "image": a["images"][-1]["url"] if a.get("images") else None,
             }
@@ -2688,8 +2783,57 @@ def disable_spotify_feature(name):
 def spotify_feature_removed(exc):
     # A local guard block (the app-registration one is a 403) or "user not registered"
     # says nothing about whether the endpoint exists; don't disable features on them.
-    return (isinstance(exc, spotipy.SpotifyException) and exc.http_status in (403, 404)
+    # 403: Spotify's answer to endpoints removed for Development Mode apps created after
+    # 2026-02-11 (batch artists, artist top tracks, /browse, ...); 404/410: gone for everyone.
+    return (isinstance(exc, spotipy.SpotifyException) and exc.http_status in (403, 404, 410)
             and not is_local_guard_block(exc) and not is_spotify_app_registration_error(exc))
+
+_SPOTIFY_FIELDS_REJECTED = set()   # fields filters Spotify answered 400 to (this session): not resent
+
+def _split_top_level_fields(fields):
+    parts, depth, cur = [], 0, []
+    for ch in str(fields or ""):
+        depth += (ch == "(") - (ch == ")")
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return [p.strip() for p in parts if p.strip()]
+
+def _spotify_playlist_fields_variants(fields):
+    """``fields``; the same filter without the pre-2026 playlist ``tracks`` object; then None."""
+    out = []
+    if fields:
+        out.append(fields)
+        modern = ",".join(p for p in _split_top_level_fields(fields)
+                          if p.split(".", 1)[0].split("(", 1)[0].strip() != "tracks")
+        if modern and modern not in out:
+            out.append(modern)
+    with _spotify_feature_lock:
+        rejected = set(_SPOTIFY_FIELDS_REJECTED)
+    return [f for f in out if f not in rejected] + [None]
+
+def spotify_playlist_meta(sp, playlist_id, fields=None):
+    """sp.playlist() for both API generations. Development Mode apps created after 2026-02-11
+    see ``items`` where older apps see ``tracks``, and Spotify may reject (400) a filter naming
+    the old object: retry without those names, then unfiltered. A filter is remembered as
+    rejected (never sent again this session) only once a later variant worked, so a 400 about
+    the playlist id itself does not degrade later calls."""
+    rejected_now = []
+    for f in _spotify_playlist_fields_variants(fields):
+        try:
+            meta = sp.playlist(playlist_id, fields=f) if f else sp.playlist(playlist_id)
+        except spotipy.SpotifyException as e:
+            if f and getattr(e, "http_status", None) == 400 and not is_local_guard_block(e):
+                rejected_now.append(f)
+                continue
+            raise
+        if rejected_now:
+            with _spotify_feature_lock:
+                _SPOTIFY_FIELDS_REJECTED.update(rejected_now)
+        return meta
 
 def playlist_total_from_meta(meta, fallback=0):
     if not meta:
@@ -2715,6 +2859,18 @@ def playlist_entry_media(entry):
     if isinstance(media, dict):
         return media
     return None
+
+_GENRE_LOOKUP_BUDGET_RESERVE = 6   # artist() slots per budget window kept free for interactive use
+
+def _spotify_budget_left(method_name):
+    """Live calls ``method_name`` may still make in its guard budget window (None = unbudgeted)."""
+    limit, window_s = _spotify_guard_policy(method_name).get("budget") or (0, 0)
+    if not limit or not window_s:
+        return None
+    cutoff = time.monotonic() - window_s
+    with _SPOTIFY_GUARD_LOCK:
+        used = sum(1 for t in (_SPOTIFY_GUARD_BUDGET_BUCKETS.get(method_name) or ()) if t >= cutoff)
+    return max(0, int(limit) - used)
 
 def ensure_artist_genre_cache(sp, artist_ids):
     """Fill artist_genre_cache for artist_ids.
@@ -2744,7 +2900,14 @@ def ensure_artist_genre_cache(sp, artist_ids):
                     state["last_error"] = f"Genre fetch: {e}"
     with artist_genre_lock:
         still_needed = [a for a in needed if a not in artist_genre_cache]
-    for artist_id in still_needed:
+    for i, artist_id in enumerate(still_needed):
+        # The batch endpoint is gone for new apps, so this is one artist() call per id. Genres
+        # are garnish: after the first lookup, leave headroom in the artist() budget for the
+        # artist page and clicks; the rest fill in on later calls (answers are cached).
+        if i > 0:
+            left = _spotify_budget_left("artist")
+            if left is not None and left <= _GENRE_LOOKUP_BUDGET_RESERVE:
+                break
         try:
             artist = sp.artist(artist_id)
             genres = (artist or {}).get("genres") or []
@@ -2896,7 +3059,7 @@ def get_liked_songs_page(sp, force=False, ttl_s=300, limit=120):
         if not items:
             break
         for item in items:
-            tr = item.get("track") or {}
+            tr = playlist_entry_media(item) or {}   # "track" (legacy) or "item" (2026 naming)
             tid = tr.get("id")
             if not tid:
                 continue
@@ -2981,7 +3144,7 @@ def get_liked_artist_counts(sp, force=False, ttl_s=900):
         if not items:
             break
         for item in items:
-            track = item.get("track") or {}
+            track = playlist_entry_media(item) or {}
             for artist in track.get("artists") or []:
                 name = (artist.get("name") or "").strip()
                 if name:
@@ -3219,6 +3382,61 @@ def small_image(images):
     # Prefer the smallest reasonable image
     return images[-1]["url"] if images else None
 
+def _spotify_track_row(t):
+    """A Spotify track object as an artist-page track row (missing fields tolerated)."""
+    album = t.get("album") or {}
+    artists = [a for a in (t.get("artists") or []) if isinstance(a, dict)]
+    return {
+        "id": t.get("id"),
+        "name": t.get("name") or "",
+        "artists": ", ".join(a.get("name") or "" for a in artists),
+        "artist_list": [{"id": a.get("id"), "name": a.get("name")} for a in artists],
+        "album": album.get("name"),
+        "image": small_image(album.get("images")),
+        "url": (t.get("external_urls") or {}).get("spotify"),
+        "uri": t.get("uri") or (f"spotify:track:{t['id']}" if t.get("id") else None),
+        "duration_ms": t.get("duration_ms"),
+    }
+
+def spotify_artist_top_tracks_via_search(sp, artist_id, artist_name, limit=SPOTIFY_SEARCH_MAX_LIMIT):
+    """Stand-in for GET /artists/{id}/top-tracks, which Development Mode apps created after
+    2026-02-11 no longer have: one search for ``artist:"<name>"`` (limit <= 10), keeping tracks
+    credited to this artist (by id, else by normalized name) in Spotify's relevance order, one
+    per title. Returns (rows, blocked); blocked = a local guard block or search cooldown."""
+    if not artist_name:
+        return [], False
+    if _sp_search_rate_limited():
+        return [], True
+    try:
+        _sp_search_throttle()
+        r = sp.search(q=f'artist:"{artist_name}"', type="track",
+                      limit=max(1, min(int(limit or SPOTIFY_SEARCH_MAX_LIMIT), SPOTIFY_SEARCH_MAX_LIMIT)))
+    except (SpotifyGuardBlocked, SpotifyAppRegistrationBlocked):
+        return [], True
+    except spotipy.SpotifyException as e:
+        if e.http_status == 429:
+            _note_sp_search_rate_limit(e)
+            return [], True
+        return [], False
+    except Exception:
+        return [], False
+    want = _artist_name_key(artist_name)
+    rows, seen_ids, seen_titles = [], set(), set()
+    for t in (((r or {}).get("tracks") or {}).get("items") or []):
+        if not isinstance(t, dict) or not t.get("id") or t["id"] in seen_ids:
+            continue
+        credits = [a for a in (t.get("artists") or []) if isinstance(a, dict)]
+        if not any((artist_id and a.get("id") == artist_id) or _artist_name_key(a.get("name")) == want
+                   for a in credits):
+            continue
+        title = " ".join((t.get("name") or "").casefold().split())
+        if title in seen_titles:
+            continue  # the same song on the album and on the single
+        seen_ids.add(t["id"])
+        seen_titles.add(title)
+        rows.append(_spotify_track_row(t))
+    return rows, False
+
 def fetch_artist_info(sp, primary_artist_id, primary_artist_name,
                       track_id, track_name, user_seed_tracks, primary_genre=None,
                       allow_spotify_resolution=True, resolve_budget_s=1.5):
@@ -3269,17 +3487,8 @@ def fetch_artist_info(sp, primary_artist_id, primary_artist_name,
     if primary_artist_id and spotify_feature_enabled("artist_top_tracks"):
         try:
             tt = sp.artist_top_tracks(primary_artist_id)
-            info["top_tracks"] = [{
-                "id": t["id"],
-                "name": t["name"],
-                "artists": ", ".join(a.get("name") or "" for a in (t.get("artists") or [])),
-                "artist_list": [{"id": a.get("id"), "name": a.get("name")} for a in (t.get("artists") or [])],
-                "album": (t.get("album") or {}).get("name"),
-                "image": small_image(t["album"].get("images")),
-                "url": t["external_urls"].get("spotify"),
-                "uri": t.get("uri"),
-                "duration_ms": t.get("duration_ms"),
-            } for t in tt.get("tracks", [])[:10]]
+            info["top_tracks"] = [_spotify_track_row(t) for t in ((tt or {}).get("tracks") or [])[:10]
+                                  if isinstance(t, dict) and t.get("id")]
             if info["top_tracks"] and not info.get("artist_image"):
                 info["artist_image"] = info["top_tracks"][0].get("image")
             if info["top_tracks"]:
@@ -3325,6 +3534,16 @@ def fetch_artist_info(sp, primary_artist_id, primary_artist_name,
             if not info.get("artist_image"):
                 info["artist_image"] = next((t.get("image") for t in top_tracks if t.get("image")), None)
             info["sources"].append("last.fm + spotify search (top tracks)")
+
+    if not info["top_tracks"] and primary_artist_name and allow_spotify_resolution:
+        # No top-tracks endpoint (new apps) and nothing from Last.fm (no key, or it failed):
+        # one Spotify search for the artist's tracks.
+        rows, _blocked = spotify_artist_top_tracks_via_search(sp, primary_artist_id, primary_artist_name)
+        if rows:
+            info["top_tracks"] = rows
+            if not info.get("artist_image"):
+                info["artist_image"] = next((t.get("image") for t in rows if t.get("image")), None)
+            info["sources"].append("spotify search (top tracks)")
 
     # --- Last.fm: artist info, similar artists, similar tracks ---
     if lastfm_api_key() and primary_artist_name:
@@ -3729,7 +3948,7 @@ def fetch_newly_liked(sp, limit=8):
         r = sp.current_user_saved_tracks(limit=limit)
         items = []
         for it in r.get("items", []):
-            t = it.get("track") or {}
+            t = playlist_entry_media(it) or {}
             if not t.get("id"):
                 continue
             set_cached_liked_state(t["id"], True)
@@ -3806,7 +4025,7 @@ def get_liked_library_profile(sp, force=False):
             if not items:
                 break
             for item in items:
-                track = item.get("track") or {}
+                track = playlist_entry_media(item) or {}
                 if track.get("id"):
                     tracks.append(track)
             if not res.get("next") or len(items) < page_limit:
@@ -4449,7 +4668,7 @@ def poll_loop():
             with state_lock:
                 state["auth_ready"] = False
             _poll_error(
-                f"Spotify says this account is not registered for the current development app. "
+                f"{spotify_app_access_message(_SPOTIFY_APP_REG_BLOCK_MSG)} "
                 f"Quieting API calls for {app_reg_wait}s.", "spotify_app_registration")
             engine.wait(max(POLL_INTERVAL, min(30, app_reg_wait)))
             continue
@@ -4797,7 +5016,7 @@ def _handle_unexpected_error(exc):
         code = re.sub(r"[^a-z0-9]+", "_", (exc.name or "error").lower()).strip("_") or "error"
         return _api_error_response(code, exc.description or exc.name or "Request failed.", exc.code)
     if is_api and isinstance(exc, SpotifyAppRegistrationBlocked):
-        return _api_error_response("app_not_registered", str(exc), 403,
+        return _api_error_response("app_not_registered", spotify_app_access_message(str(exc)), 403,
                                    retry_after=int(exc.retry_after or 0), local=True)
     if is_api and isinstance(exc, spotipy.SpotifyException) and getattr(exc, "http_status", None) == 429:
         retry_after = spotify_retry_after_from(exc, default=30)
@@ -4872,7 +5091,8 @@ def ensure_background_workers():
 def index():
     # The v2 UI lives in templates/index.html; until it exists, / falls back to the classic UI.
     use_v2 = (Path(app.template_folder) / "index.html").exists() and not request.args.get("classic")
-    return render_template("index.html" if use_v2 else "classic.html", poll_interval=POLL_INTERVAL)
+    return render_template("index.html" if use_v2 else "classic.html", poll_interval=POLL_INTERVAL,
+                           demo_mode=DEMO_MODE)
 
 
 @app.route("/classic")
@@ -5097,8 +5317,7 @@ def spotify_status_summary():
         return out
     if app_until > now_mono:
         out.update(state="app_not_registered", until_ms=to_ms(app_until), reason="app_registration",
-                   message=("Spotify rejected this account for the app. Add it under User Management "
-                            "in the Spotify developer dashboard, then sign in again."),
+                   message=spotify_app_access_message(app_msg),
                    detail=app_msg,
                    paused=["Now playing", "Auto-clear", "Likes & playback controls", "Spotify search"],
                    working=list(_WORKS_WITHOUT_SPOTIFY))
@@ -5209,11 +5428,18 @@ def _auth_page(title, detail, status):
 
 @app.route("/login")
 def login():
+    if DEMO_MODE:
+        return redirect("/#/now")  # the offline demo is always "signed in" to its simulated Spotify
+    if _oauth is None:
+        return redirect("/#/setup")  # no Spotify app yet: the Setup screen collects it
     auth_url = _oauth.get_authorize_url(state=_new_oauth_state())
     return redirect(auth_url)
 
 @app.route("/callback")
 def callback():
+    if _oauth is None:
+        return _auth_page("Spotify isn't set up yet",
+                          "Add your Spotify app's Client ID and Secret on the Setup screen first.", 400)
     state_ok = _consume_oauth_state(request.args.get("state"))
     err = request.args.get("error")
     if err:
@@ -5260,7 +5486,7 @@ def _effective_setting_value(key, env):
     if os.environ.get(key) is not None:
         return os.environ[key]
     defaults = {
-        "SPOTIPY_REDIRECT_URI": "http://127.0.0.1:8888/callback",
+        "SPOTIPY_REDIRECT_URI": spotify_redirect_uri(),
         "APP_DEBUG": "1" if DEBUG_MODE else "0",
         "APP_USE_RELOADER": "1" if USE_RELOADER else "0",
         "SPOTIFY_EXTENDED_ENDPOINTS": "1" if SPOTIFY_EXTENDED_ENDPOINTS else "0",
@@ -5422,6 +5648,9 @@ def api_settings_post():
     updates = data.get("updates")
     if not isinstance(updates, dict) or not updates:
         return _settings_error("updates", 'Send {"updates": {"SETTING": value}} with at least one setting.')
+    if DEMO_MODE and any(k in SPOTIFY_AUTH_SETTINGS for k in updates):
+        return _api_error_response("demo_mode", "The offline demo uses a simulated Spotify, so it has no "
+                                   "Spotify app to set up. Run the app without --demo to use your own.", 403)
 
     env_now = read_env_file()
     changed, skipped, ignored = {}, [], []
@@ -5734,13 +5963,65 @@ def _guard_blocked_response(exc):
                                429, retry_after=retry_after, local=is_local_guard_block(exc))
 
 
+LIKED_PAGE_MAX = 50   # Spotify's page size for saved tracks
+
+
+def _liked_songs_slice(sp, offset, limit):
+    """One page of Liked Songs straight from Spotify: (rows, total, next_offset or None)."""
+    res = _spotify_page_with_retry(lambda: sp.current_user_saved_tracks(limit=limit, offset=offset),
+                                   time.monotonic() + _PAGING_MAX_WAIT_S) or {}
+    items = res.get("items") or []
+    rows = []
+    for item in items:
+        tr = playlist_entry_media(item) or {}
+        tid = tr.get("id")
+        if not tid:
+            continue
+        artists = tr.get("artists") or []
+        album = tr.get("album") or {}
+        images = album.get("images") or []
+        rows.append({
+            "id": tid,
+            "name": tr.get("name", ""),
+            "artists": ", ".join(a.get("name", "") for a in artists if a.get("name")),
+            "artist": (artists[0].get("name") if artists else "") or "",
+            "album": album.get("name", ""),
+            "image": images[-1]["url"] if images else None,
+            "uri": tr.get("uri"),
+            "duration_ms": tr.get("duration_ms", 0),
+            "genres": get_cached_track_genres(tid),
+            "liked_at": item.get("added_at"),
+        })
+    total = res.get("total")
+    total = int(total) if isinstance(total, int) else offset + len(items)
+    return rows, total, (offset + len(items) if res.get("next") and items else None)
+
+
 @app.route("/api/liked-songs")
 def api_liked_songs():
+    """Without limit/offset: the most recent likes (cached, ~120), as the classic UI expects.
+    With them: one page straight from Spotify, {tracks, total (all your likes), offset, limit,
+    next_offset (null on the last page)}, so a list can page through every like."""
     sp = get_sp()
     if not sp:
         return _signed_out_response()
     force = request.args.get("force") == "1"
+    paged = "limit" in request.args or "offset" in request.args
+    if paged:
+        try:
+            limit = int(request.args.get("limit", LIKED_PAGE_MAX))
+            offset = int(request.args.get("offset", 0))
+        except (TypeError, ValueError):
+            return _api_error_response("bad_request", "limit and offset must be whole numbers.", 400)
+        if not 1 <= limit <= LIKED_PAGE_MAX:
+            return _api_error_response("bad_request", f"limit must be between 1 and {LIKED_PAGE_MAX}.", 400, field="limit")
+        if not 0 <= offset <= 1_000_000:
+            return _api_error_response("bad_request", "offset must be 0 or more.", 400, field="offset")
     try:
+        if paged:
+            rows, total, next_offset = _liked_songs_slice(sp, offset, limit)
+            return jsonify({"tracks": rows, "total": total, "offset": offset, "limit": limit,
+                            "next_offset": next_offset})
         tracks = get_liked_songs_page(sp, force=force)
         return jsonify({"tracks": tracks, "total": len(tracks)})
     except SpotifyGuardBlocked as e:
@@ -6111,11 +6392,13 @@ def api_research_add():
     entity_type = data.get("entity_type") or "track"
     entity_name, err_name = _optional_str(data, "entity_name")
     entity_id, err_id = _optional_str(data, "entity_id")
+    # Who made the track/album: an item without a Spotify id is otherwise just a title.
+    artist_name, err_artist = _optional_str(data, "artist_name")
     reasons = data.get("reasons")
     if isinstance(reasons, str):
         reasons = [reasons]
     note = data.get("note")
-    for field, err in (("entity_name", err_name), ("entity_id", err_id)):
+    for field, err in (("entity_name", err_name), ("entity_id", err_id), ("artist_name", err_artist)):
         if err:
             return _api_error_response("bad_request", err, 400, field=field)
     if entity_type not in ("track", "artist", "album"):
@@ -6135,6 +6418,7 @@ def api_research_add():
             entity_id=entity_id,
             reasons=reasons,
             note=note,
+            artist_name=artist_name,
         )
         # Record RESEARCH_ADDED event
         if _SQLITE_ENABLED:
@@ -6452,7 +6736,8 @@ def api_set_playlist():
 
     # Validate the playlist exists & we can read it
     try:
-        meta = sp.playlist(pid, fields="name,owner.id,owner.display_name,collaborative,tracks.total,items.total,snapshot_id")
+        meta = spotify_playlist_meta(
+            sp, pid, fields="name,owner.id,owner.display_name,collaborative,tracks.total,items.total,snapshot_id")
     except SpotifyGuardBlocked as e:
         return jsonify({"error": "Spotify is pacing requests; try again shortly.",
                         "retry_after": int(e.retry_after or 10)}), 503
@@ -7080,7 +7365,30 @@ def api_add_to_playlist():
 
 
 # ---------- Main ----------
-def main():
+def _parse_cli(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="app.py",
+        description="Discover Cleaner: clears your Spotify backlog playlist as you listen, "
+                    "with Last.fm-style listening reports and artist pages.")
+    parser.add_argument("--demo", action="store_true",
+                        help="offline demo: a simulated Spotify and a bundled listening history "
+                             "(kept in .demo-data/; no Spotify account needed)")
+    parser.add_argument("--reset", action="store_true",
+                        help="with --demo: start the demo over from the bundled snapshot")
+    parser.add_argument("--port", type=int, default=None, metavar="N",
+                        help="port to serve on (default 8888)")
+    args = parser.parse_args(argv)
+    if args.port is not None and not 1024 <= args.port <= 65535:
+        parser.error("--port must be between 1024 and 65535")
+    if args.reset and not args.demo:
+        parser.error("--reset only applies to the offline demo: use --demo --reset")
+    return args
+
+
+def main(argv=None):
+    global SERVER_PORT, _oauth
+    args = _parse_cli(argv)
     # A redirected console on Windows (run.bat > log) encodes as cp1252, which cannot print the
     # status marks below; an unencodable mark must never abort startup (e.g. inside the SQLite init).
     for _stream in (sys.stdout, sys.stderr):
@@ -7088,10 +7396,18 @@ def main():
             _stream.reconfigure(errors="replace")
         except Exception:
             pass
-    if not os.environ.get("SPOTIPY_CLIENT_ID") or not os.environ.get("SPOTIPY_CLIENT_SECRET"):
-        print("ERROR: SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET must be set.")
-        print("Copy .env.example to .env and fill them in.")
-        return
+    if args.demo and not DEMO_MODE:
+        # The demo's data folder is chosen at import time; it cannot be switched on afterwards.
+        print("  ✗ Start the offline demo with: python app.py --demo")
+        return 2
+    SERVER_PORT = args.port or 8888
+    url = f"http://127.0.0.1:{SERVER_PORT}"
+    if not DEMO_MODE:
+        _oauth = build_oauth_manager()  # its default Redirect URI follows --port
+        _uri = (os.environ.get("SPOTIPY_REDIRECT_URI") or "").strip()
+        if _uri and urllib.parse.urlsplit(_uri).port not in (SERVER_PORT, None):
+            print(f"  ! SPOTIPY_REDIRECT_URI ({_uri}) points at another port than {SERVER_PORT}: "
+                  f"Spotify sign-in will fail until they match.")
 
     # With the auto-reloader on, this process only watches files and re-spawns a child
     # (WERKZEUG_RUN_MAIN=true) that serves requests. Background work must start in that
@@ -7125,22 +7441,29 @@ def main():
     if lastfm_api_key():
         _lfm_user = lastfm_username()
         print(f"  \u2713 Last.fm enrichment enabled" + (f" (user: {_lfm_user})" if _lfm_user else " (no username \u2014 set LASTFM_USERNAME for personalization)"))
-    else:
-        print("  \u00b7 Last.fm not configured (set LASTFM_API_KEY in .env to enable similar artists/tracks/bio)")
+    elif not DEMO_MODE:
+        print("  \u00b7 Last.fm not configured (optional: add it on the Setup screen or in Settings for your full history)")
 
-    if not get_cached_token():
+    if DEMO_MODE:
+        print("\n  \u2713 Offline demo: simulated Spotify, the author's listening history (data in .demo-data/).")
+        print("    Nothing here talks to Spotify. Start over with --demo --reset.")
+        print(f"  \u2192 Open {url}\n")
+    elif not spotify_credentials_configured():
+        print("\n  \u00b7 No Spotify app set up yet.")
+        print(f"  \u2192 Open {url} and follow the Setup steps (Redirect URI: {spotify_redirect_uri()})\n")
+    elif not get_cached_token():
         print("\n  No valid token cached.")
-        print("  \u2192 Open http://127.0.0.1:8888 and click 'Log in with Spotify'\n")
+        print(f"  \u2192 Open {url} and click 'Connect Spotify'\n")
     else:
         print("\n  \u2713 Cached token loaded.")
-        print("  \u2192 Open http://127.0.0.1:8888\n")
+        print(f"  \u2192 Open {url}\n")
 
     _dm = 'on' if DEBUG_MODE else 'off'
     _rl = 'on' if USE_RELOADER else 'off'
     _ext = 'on' if SPOTIFY_EXTENDED_ENDPOINTS else 'off'
     print(f"  \u00b7 Debug mode: {_dm} (reloader: {_rl})")
     print(f"  \u00b7 Spotify extended endpoints: {_ext}")
-    app.run(host="127.0.0.1", port=8888, debug=DEBUG_MODE, use_reloader=USE_RELOADER)
+    app.run(host="127.0.0.1", port=SERVER_PORT, debug=DEBUG_MODE, use_reloader=USE_RELOADER)
 
 
 # v2 API blueprints (src/web/*). Registered at import time so every entry point
@@ -7151,7 +7474,12 @@ try:
 except Exception as _bp_err:  # pragma: no cover
     _log_app_error(_bp_err, context="register_blueprints")
 
+# Offline demo: every Spotify call goes to the simulated FakeSpotify (src/devtools/fake_spotify.py)
+# through the real guard, so the poll loop, clearing engine and UI run exactly as with Spotify.
+if DEMO_MODE:
+    _demo.install(sys.modules[__name__])
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
 

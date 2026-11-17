@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "frozen_on": "2026-10-04",
+  "description": "The author's real listening history (Last.fm scrobbles since 2021 plus what Discover Cleaner recorded), frozen on 2026-10-04. Account details are removed; see dev/make_snapshot.py for exactly what is kept.",
+  "playlist_id": "5bxDiscoverBacklogDemo",
+  "playlist_name": "Discover Backlog (demo)",
+  "user_display_name": "Dholeson",
+  "backlog_size_offset": 688,
+  "rows": {
+    "tracks": 498,
+    "track_artists": 98,
+    "events": 52576,
+    "interests": 4,
+    "interest_reasons": 10,
+    "artist_likes": 22,
+    "listen_sessions": 95,
+    "track_listens": 700,
+    "app_meta": 2
+  }
+}

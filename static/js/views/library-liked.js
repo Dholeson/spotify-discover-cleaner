@@ -1,6 +1,7 @@
-// Library → Liked (GET /api/liked-songs): your most recently liked songs from Spotify, with how
-// often you've played each one (from your local history). Search, sort and a "never played"
-// filter are instant and live in the URL (#/library/liked?q=&sort=&unplayed=1).
+// Library → Liked (GET /api/liked-songs?limit=&offset=): your liked songs from Spotify, newest
+// first, 50 at a time ("Load more" / "Load all" page through every like), with how often you've
+// played each one (from your local history). Search, sort and a "never played" filter work on
+// the loaded songs, are instant and live in the URL (#/library/liked?q=&sort=&unplayed=1).
 import { api, isAbort } from '../core/api.js';
 import router from '../core/router.js';
 import {
@@ -10,6 +11,7 @@ import {
 import { creditLinks, playButton, moreButton, openTrackMenu, searchBox, playCounts, captureFocus, restoreFocus, coolingDownText } from './library-shared.js';
 
 const FRESH_MS = 5 * 60 * 1000;
+const PAGE = 50;   // Spotify's page size for saved tracks
 const SORTS = [
   { id: 'recent', label: 'Recently liked' },
   { id: 'plays', label: 'Most played' },
@@ -18,14 +20,30 @@ const SORTS = [
 const PLAYS_DEF = 'Plays of this song in your whole history (Last.fm scrobbles plus plays in the app). Other versions of the same song — live, remastered — count too.';
 
 // Session cache: Spotify calls are slow and rate-limited, so switching tabs never refetches.
-const cache = { tracks: null, fetchedAt: 0, counts: null };
+// counts: Map id -> plays, filled page by page (null until the first page's counts arrive).
+const cache = { tracks: null, total: null, nextOffset: null, fetchedAt: 0, counts: null };
 
 export function createLikedTab({ setCount }) {
   let el = null;
   let listEl = null;
   let off = [];
   let ctrl = null;
-  const st = { q: '', sort: 'recent', unplayed: false, loading: false, error: null };
+  // more: 'one' | 'all' while extra pages load; moreError: why the last extra page failed
+  const st = { q: '', sort: 'recent', unplayed: false, loading: false, error: null, more: null, moreError: null };
+
+  const fetchPage = (offset, signal) => api.get('/api/liked-songs', { params: { limit: PAGE, offset }, signal, timeoutMs: 45000 });
+
+  function takePage(r, { reset }) {
+    const rows = Array.isArray(r?.tracks) ? r.tracks : [];
+    if (reset) cache.tracks = [];
+    const have = new Set(cache.tracks.map((t) => t.id));
+    const fresh = rows.filter((t) => t && t.id && !have.has(t.id));
+    cache.tracks.push(...fresh);
+    cache.total = Number.isFinite(Number(r?.total)) ? Number(r.total) : cache.tracks.length;
+    cache.nextOffset = r?.next_offset ?? null;
+    setCount('liked', cache.total);
+    return fresh;
+  }
 
   async function load({ force = false } = {}) {
     if (ctrl) ctrl.abort();
@@ -33,15 +51,16 @@ export function createLikedTab({ setCount }) {
     ctrl = my;
     st.loading = true;
     st.error = null;
+    st.more = null;
+    st.moreError = null;
     if (cache.tracks) listEl?.classList.add('is-refetching');
     render();
     try {
-      const r = await api.get('/api/liked-songs', { params: { force: force ? 1 : undefined }, signal: my.signal, timeoutMs: 45000 });
-      cache.tracks = Array.isArray(r?.tracks) ? r.tracks : [];
+      const r = await fetchPage(0, my.signal);
       cache.fetchedAt = Date.now();
       cache.counts = null;
-      setCount('liked', cache.tracks.length);
-      loadCounts();
+      takePage(r, { reset: true });
+      loadCounts(cache.tracks, my.signal);
     } catch (err) {
       if (isAbort(err)) return;
       st.error = err;
@@ -54,12 +73,39 @@ export function createLikedTab({ setCount }) {
     }
   }
 
-  async function loadCounts() {
-    const tracks = cache.tracks || [];
-    if (!tracks.length) return;
+  /** The next page (or every remaining page, one after another, with all: true). */
+  async function loadMore({ all = false } = {}) {
+    if (st.more || st.loading || cache.nextOffset == null) return;
+    const my = ctrl || new AbortController();
+    ctrl = my;
+    st.more = all ? 'all' : 'one';
+    st.moreError = null;
+    render();
     try {
-      const r = await playCounts({ tracks: tracks.map((t) => ({ id: t.id, name: t.name, artist: t.artist || (t.artists || '').split(', ')[0] })) }, { signal: ctrl?.signal });
-      cache.counts = new Map(tracks.map((t, i) => [t.id, r.tracks[i]]));
+      do {
+        const r = await fetchPage(cache.nextOffset, my.signal);
+        if (my.signal.aborted) return;
+        const fresh = takePage(r, { reset: false });
+        loadCounts(fresh, my.signal);
+        render();
+      } while (all && cache.nextOffset != null && st.more === 'all');
+    } catch (err) {
+      if (isAbort(err)) return;
+      st.moreError = err;
+    } finally {
+      if (my === ctrl && !my.signal.aborted) {
+        st.more = null;
+        render();
+      }
+    }
+  }
+
+  async function loadCounts(tracks, signal) {
+    if (!tracks?.length) return;
+    try {
+      const r = await playCounts({ tracks: tracks.map((t) => ({ id: t.id, name: t.name, artist: t.artist || (t.artists || '').split(', ')[0] })) }, { signal });
+      if (!cache.counts) cache.counts = new Map();
+      tracks.forEach((t, i) => cache.counts.set(t.id, r.tracks[i]));
       render();
     } catch { /* counts are optional */ }
   }
@@ -114,8 +160,30 @@ export function createLikedTab({ setCount }) {
       })}`);
       return;
     }
-    mount(listEl, html`${note}<div class="list lib-list" role="list" aria-label="Liked songs">${list.map(row)}</div>`);
+    mount(listEl, html`${note}<div class="list lib-list" role="list" aria-label="Liked songs">${list.map(row)}</div>${moreFooter()}`);
     restoreFocus(listEl, saved);
+  }
+
+  /** "Showing 50 of 1,234 · Load 50 more · Load all" under the list while Spotify has more. */
+  function moreFooter() {
+    const loaded = (cache.tracks || []).length;
+    const total = Math.max(cache.total || 0, loaded);
+    const more = cache.nextOffset != null;
+    if (!more && !st.moreError) return '';
+    const left = Math.max(0, total - loaded);
+    const filtered = !!(st.q || st.unplayed);
+    const busy = st.more === 'all'
+      ? html`<span class="lib-more-busy" role="status"><span class="spinner spinner-sm" aria-hidden="true"></span>Loading all your liked songs… ${fmt.num(loaded)} of ${fmt.num(total)}</span>
+        <button type="button" class="btn btn-ghost btn-sm" data-action="lk-stop">Stop</button>`
+      : st.more === 'one'
+        ? html`<span class="lib-more-busy" role="status"><span class="spinner spinner-sm" aria-hidden="true"></span>Loading…</span>`
+        : html`<button type="button" class="btn btn-secondary btn-sm" data-action="lk-more">${icon('chevronDown')}Load ${fmt.num(Math.min(PAGE, left || PAGE))} more</button>
+          ${left > PAGE ? html`<button type="button" class="btn btn-ghost btn-sm" data-action="lk-all">Load all ${fmt.num(total)}</button>` : ''}`;
+    return html`<div class="lib-more">
+      <p class="lib-more-text">Showing ${fmt.num(loaded)} of ${fmt.num(total)} liked songs, newest first.${filtered ? ' Search and filters cover the loaded songs.' : ''}</p>
+      ${st.moreError ? html`<p class="lib-more-error" role="alert">${st.moreError.isRateLimited ? coolingDownText(st.moreError) : st.moreError.message}</p>` : ''}
+      <div class="lib-more-actions">${more ? busy : ''}</div>
+    </div>`;
   }
 
   function failure() {
@@ -135,7 +203,13 @@ export function createLikedTab({ setCount }) {
     if (all.length) {
       const zero = cache.counts ? all.filter((t) => cache.counts.get(t.id) === 0).length : null;
       const shown = visible().length;
-      content = html`<span>${shown === all.length ? `Your ${fmt.num(all.length)} most recently liked songs` : `${fmt.num(shown)} of ${fmt.num(all.length)} liked songs`}</span>${zero ? html`<span class="lib-summary-insight"> · ${fmt.num(zero)} never played${infoTip('Liked songs with no plays in your history (Last.fm scrobbles plus plays in the app). Use the filter to find them.', { label: 'Never played' })}</span>` : ''}`;
+      const total = Math.max(cache.total || 0, all.length);
+      const whole = total <= all.length;
+      let lead;
+      if (shown !== all.length) lead = `${fmt.num(shown)} of ${fmt.num(all.length)} loaded liked songs`;
+      else if (whole) lead = `All ${fmt.num(total)} of your liked songs`;
+      else lead = `Your ${fmt.num(all.length)} most recent liked songs (of ${fmt.num(total)})`;
+      content = html`<span>${lead}</span>${zero ? html`<span class="lib-summary-insight"> · ${fmt.num(zero)} never played${whole ? '' : ' so far'}${infoTip('Liked songs with no plays in your history (Last.fm scrobbles plus plays in the app). Use the filter to find them.', { label: 'Never played' })}</span>` : ''}`;
     }
     mount(s, content);
     const chip = el.querySelector('[data-action="lk-unplayed"]');
@@ -150,6 +224,9 @@ export function createLikedTab({ setCount }) {
   function wire() {
     off.push(actions(el, {
       'lk-refresh': (ds, btn) => withBusy(btn, () => load({ force: true })),
+      'lk-more': () => loadMore(),
+      'lk-all': () => loadMore({ all: true }),
+      'lk-stop': () => { if (st.more === 'all') st.more = 'one'; },
       'lk-unplayed': () => router.setQuery({ unplayed: st.unplayed ? null : '1' }),
       'lk-reset': () => { const i = el.querySelector('.lib-search-input'); if (i) i.value = ''; router.setQuery({ q: null, unplayed: null }); },
       'lib-more': (ds, btn) => {
@@ -176,6 +253,8 @@ export function createLikedTab({ setCount }) {
     mount(container, params) {
       el = container;
       applyParams(params);
+      st.more = null;          // a page load cut short by leaving the tab doesn't block "Load more"
+      st.moreError = null;
       mount(el, html`
         <div class="lib-toolbar">
           ${searchBox({ value: st.q, placeholder: 'Search liked songs', label: 'Search your liked songs' })}
@@ -188,9 +267,9 @@ export function createLikedTab({ setCount }) {
         <div class="lib-body" data-list></div>`);
       listEl = el.querySelector('[data-list]');
       wire();
-      if (cache.tracks) { setCount('liked', cache.tracks.length); render(); }
+      if (cache.tracks) { setCount('liked', cache.total ?? cache.tracks.length); render(); }
       if (!cache.tracks || Date.now() - cache.fetchedAt > FRESH_MS) load();
-      else if (!cache.counts) loadCounts();
+      else if (!cache.counts) loadCounts(cache.tracks);
       else render();
     },
     update(params) {

@@ -310,6 +310,24 @@ class ReportTests(Base):
         self.assertEqual(albums, {"A-Album": "https://i.scdn.co/image/hit", "B-Album": None})
         # no tracks table at all: no art, no error
         self.assertIsNone(self.rep["top"]["tracks"][0]["image"])
+        # the year's top artist borrows their top album's cover (there is no artist photo)
+        y = R.year_in_music(L.conn, 2026, now_ms=NOW)
+        self.assertEqual(y["top_artist"]["name"], "Alpha")
+        self.assertEqual(y["top_artist"]["image"], "https://i.scdn.co/image/hit")
+        self.assertEqual(y["top_artist"]["image_from"], {"kind": "album", "name": "A-Album"})
+
+    def test_year_top_artist_cover_beyond_the_top_lists(self):
+        # Alpha's only song with art is not in the year's top 5 lists: found by the fallback query
+        L = standard_ledger()
+        L.play(ms(2026, 2, 3, 9), "Alpha", "Deep Cut", album="Rare EP", spotify_id="sp-deep")
+        L.conn.execute("CREATE TABLE tracks (id TEXT PRIMARY KEY, name TEXT, album TEXT, album_id TEXT, "
+                       "image_url TEXT, spotify_url TEXT, duration_ms INTEGER, created_at TEXT)")
+        L.conn.execute("INSERT INTO tracks (id, name, image_url) VALUES ('sp-deep', 'Deep Cut', 'https://i.scdn.co/image/deep')")
+        L.conn.commit()
+        R.reset_caches()
+        top = R.year_in_music(L.conn, 2026, now_ms=NOW)["top_artist"]
+        self.assertEqual(top["image"], "https://i.scdn.co/image/deep")
+        self.assertEqual(top["image_from"], {"kind": "album", "name": "Rare EP"})
 
     def test_top_lists_badges_and_ranks(self):
         a = self.rep["top"]["artists"]
@@ -579,7 +597,7 @@ class OverviewTests(Base):
         y = R.year_in_music(self.L.conn, 2026, now_ms=NOW)
         self.assertFalse(y["complete"])
         self.assertEqual((y["plays"], y["prev_plays"], y["pct_change"]), (63, 8, 688))
-        self.assertEqual(y["top_artist"], {"name": "Alpha", "key": "alpha", "plays": 42})
+        self.assertEqual(y["top_artist"], {"name": "Alpha", "key": "alpha", "plays": 42, "image": None})
         self.assertEqual((y["top_track"]["name"], y["top_track"]["plays"]), ("Hit", 22))
         self.assertEqual(y["top_album"]["artist"], "Alpha")
         self.assertEqual(y["top_new_artist"]["name"], "Delta")
@@ -658,6 +676,16 @@ class TodayTests(Base):
         self.assertEqual(R.today_counts(self.L.conn, NOW, "t9", 5, 10)["heard_in_app"], 2)
         self.assertEqual(R.today_counts(self.L.conn, NOW, "t1", 20, 10)["heard_in_app"], 2)
 
+    def test_short_skips_are_not_heard(self):
+        # "Heard in app" uses the play rule (30 s), so it can't exceed Plays because of skips
+        self.L.event("SONG_PLAYED", self.at(self.today, 12), "skip1", listened_s=4)
+        self.L.event("SONG_PLAYED", self.at(self.today, 12, 5), "old_payload")   # no listened_s
+        self.L.conn.commit()
+        self.assertEqual(R.today_counts(self.L.conn, NOW)["heard_in_app"], 2)
+        # the playing track needs 30 s by default too
+        self.assertEqual(R.today_counts(self.L.conn, NOW, "t9", 20)["heard_in_app"], 2)
+        self.assertEqual(R.today_counts(self.L.conn, NOW, "t9", 31)["heard_in_app"], 3)
+
     def test_cleared_today_matches_sql_distinct_count(self):
         t0 = R.midnight_ms(self.today)
         sql = self.L.conn.execute(
@@ -717,6 +745,11 @@ class BacklogInsightTests(Base):
         for k in ("inflow", "cleared", "net", "measured", "exact", "start_day", "days"):
             self.assertIn(k, out["windows"]["last_7"])
         json.dumps(out)
+        # definitions are shown verbatim in info tooltips: plain words, no API field names
+        for key, text in out["definitions"].items():
+            self.assertNotIn("_", text, key)
+            for word in ("exact", "measured'", "since_start", "start_day"):
+                self.assertNotIn(word, text, key)
 
     def _off_fixture(self):
         """Clears on Sep 5, 12, 21 (+ one undone on Sep 20); sizes recorded Sep 1 and 10 only."""

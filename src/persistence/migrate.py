@@ -9,12 +9,12 @@ import json
 import logging
 from pathlib import Path
 
-from .db import get_conn
+from .db import DATA_DIR, get_conn
 from .events import write_from_legacy
 
 log = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).parent.parent.parent / ".config.json"
+CONFIG_PATH = Path(DATA_DIR) / ".config.json"
 MIGRATION_KEY = "migrated_config_history_v1"
 
 

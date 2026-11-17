@@ -1046,6 +1046,35 @@ def report(conn, period="month", anchor=None, limit=10, now_ms=None, ledger_wait
 # year in music
 # ---------------------------------------------------------------------------
 
+def _artist_cover(conn, top, artist_key, start_ms, end_ms):
+    """Album art standing in for an artist photo (the app stores none): the cover of the artist's
+    most played album in the period, else of their most played song with known art.
+
+    Returns {"image", "image_from": {"kind": "album" | "track", "name"}} or {"image": None}.
+    """
+    for kind, label in (("albums", "album"), ("tracks", "track")):
+        for r in top.get(kind) or ():
+            if r.get("artist_key") == artist_key and r.get("image"):
+                return {"image": r["image"], "image_from": {"kind": label, "name": r.get("name")}}
+    try:
+        for col, label in (("album_key", "album"), ("song_key", "track")):
+            name_col = "album_name" if label == "album" else "track_name"
+            rows = _rows(conn, f"""SELECT {col}, MAX({name_col}), COUNT(*) AS n FROM plays
+                WHERE artist_key = ? AND ts_ms >= ? AND ts_ms < ? AND superseded_by IS NULL
+                  AND {col} IS NOT NULL AND {col} != ''
+                GROUP BY {col} ORDER BY n DESC LIMIT 10""", (artist_key, start_ms, end_ms))
+            if not rows:
+                continue
+            art = local_art(conn, **{"song_keys" if label == "track" else "album_keys": [r[0] for r in rows]})
+            found = art[0] if label == "track" else art[1]
+            for key, name, _ in rows:
+                if found.get(key):
+                    return {"image": found[key], "image_from": {"kind": label, "name": name}}
+    except Exception:
+        pass   # art is decoration
+    return {"image": None}
+
+
 def year_in_music(conn, year=None, now_ms=None, ledger_wait=True):
     now_ms = _now_ms() if now_ms is None else int(now_ms)
     today = local_day(now_ms)
@@ -1083,6 +1112,9 @@ def year_in_music(conn, year=None, now_ms=None, ledger_wait=True):
     months = [p for p in rep["series"]["points"] if p["plays"]]
     peak = max(months, key=lambda p: (p["plays"], -int(p["key"][5:]))) if months else None
     top_artist = pick(top["artists"], False)
+    if top_artist:
+        top_artist.update(_artist_cover(conn, top, top_artist["key"], rep["period"]["start_ms"],
+                                        rep["period"]["end_ms"]))
     return {
         "year": year,
         "complete": rep["period"]["complete"],
@@ -1370,6 +1402,9 @@ def overview(conn, now_ms=None, ledger_wait=True):
 # ---------------------------------------------------------------------------
 
 UNDO_WINDOW_MS = 35 * 60 * 1000   # an undo is only offered for 30 min after a clear
+# "Heard in app" uses the rule that makes an app play count as a play in the ledger
+# (plays.MIN_LIVE_S), so the Today card never shows more tracks heard than plays.
+HEARD_MIN_S = 30.0
 
 
 def _effective_clears(rows):
@@ -1399,7 +1434,8 @@ def today_sets(conn, now_ms=None, include_plays=True):
     live = " AND (source IS NULL OR source='live')" if "source" in _columns(conn, "events") else ""
     heard = _rows(conn, f"""SELECT track_id, MAX(ts_ms) FROM events
         WHERE ts_ms >= ? AND ts_ms < ? AND event_type='SONG_PLAYED' AND track_id IS NOT NULL{live}
-        GROUP BY track_id""", (t7, t1))
+          AND CAST(json_extract(payload, '$.listened_s') AS REAL) >= ?
+        GROUP BY track_id""", (t7, t1, HEARD_MIN_S))
     removal_rows = _rows(conn, """SELECT event_type, track_id, ts_ms FROM events
         WHERE ts_ms >= ? AND ts_ms < ? AND event_type IN ('TRACK_REMOVED_FROM_QUEUE','TRACK_RESTORED')
           AND track_id IS NOT NULL
@@ -1439,12 +1475,13 @@ def today_from_sets(sets, extra_heard=()):
     }
 
 
-def today_counts(conn, now_ms=None, current_track_id=None, current_listened_s=0.0, min_listen_s=10.0,
+def today_counts(conn, now_ms=None, current_track_id=None, current_listened_s=0.0, min_listen_s=HEARD_MIN_S,
                  include_plays=True):
     """Counts for the 'today' strip. Everything is distinct per track and uses local midnight.
 
-    - heard_in_app: distinct tracks this app logged a play for today, plus the track playing now
-      once it has played ``min_listen_s`` seconds.
+    - heard_in_app: distinct tracks this app saw played for HEARD_MIN_S seconds or more today
+      (shorter skips are not "heard"), plus the track playing now once it has played
+      ``min_listen_s`` seconds.
     - cleared_today: distinct tracks removed from the backlog today and not restored (undo).
     - liked_today: distinct tracks liked in the app today.
     - plays_today: canonical plays in the ledger since midnight (None while there is no ledger).

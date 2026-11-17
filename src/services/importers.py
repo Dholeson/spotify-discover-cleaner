@@ -700,7 +700,7 @@ def run_spotify_import(sp, conn=None, seed_artist_likes=False, state=None, sleep
             if not items:
                 break
             for item in items:
-                track = item.get("track") or {}
+                track = item.get("track") or item.get("item") or {}   # "item": Spotify's 2026 naming
                 tid = track.get("id")
                 if not tid:
                     continue

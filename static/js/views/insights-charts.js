@@ -36,6 +36,8 @@ function text(parent, attrs, str) {
 }
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+// "1 track added", not "1 tracks added": the unit's first word loses its plural s for exactly 1.
+const unitFor = (v, label) => (Number(v) === 1 ? String(label).replace(/^(\w+?)s\b/, '$1') : label);
 const crisp = (v) => Math.round(v) + 0.5;
 const NF = new Intl.NumberFormat('en-US');
 const fmtNum = (v) => (v == null || !Number.isFinite(Number(v)) ? '–' : NF.format(Math.round(Number(v))));
@@ -207,7 +209,7 @@ export function timeLine(points, opts = {}) {
 
   m.tip = (i) => {
     const p = data[i];
-    return { value: `${fmtNum(p.value)} ${o.valueLabel}`, label: dayFmt.format(p.d), note: p.note || '', color: 'var(--series-1)' };
+    return { value: `${fmtNum(p.value)} ${unitFor(p.value, o.valueLabel)}`, label: dayFmt.format(p.d), note: p.note || '', color: 'var(--series-1)' };
   };
   m.anchor = (i) => {
     const g = m.geo[i]; const r = m.svg.getBoundingClientRect();
@@ -315,7 +317,7 @@ export function timeLine(points, opts = {}) {
     m.hits = data.map((p, i) => {
       const x0 = i ? (m.geo[i - 1].x + m.geo[i].x) / 2 : padL;
       const x1 = i < data.length - 1 ? (m.geo[i].x + m.geo[i + 1].x) / 2 : W - padR;
-      return s('rect', { class: 'chart-hit', 'data-i': i, x: x0, y: 0, width: Math.max(1, x1 - x0), height: H, tabindex: '-1', role: 'img', 'aria-label': `${dayFmt.format(p.d)}: ${fmtNum(p.value)} ${o.valueLabel}` }, gHits);
+      return s('rect', { class: 'chart-hit', 'data-i': i, x: x0, y: 0, width: Math.max(1, x1 - x0), height: H, tabindex: '-1', role: 'img', 'aria-label': `${dayFmt.format(p.d)}: ${fmtNum(p.value)} ${unitFor(p.value, o.valueLabel)}` }, gHits);
     });
     m.count = data.length;
     const start = activeBefore >= 0 && activeBefore < m.count ? activeBefore : m.count - 1;
@@ -359,7 +361,7 @@ export function gapBars(points, opts = {}) {
   const valText = (v) => {
     if (v == null) return o.missingText;
     if (o.formatValue) return o.formatValue(v);
-    return `${fmtNum(v)} ${v === 1 ? o.valueLabel.replace(/s$/, '') : o.valueLabel}`;
+    return `${fmtNum(v)} ${unitFor(v, o.valueOne && v === 1 ? o.valueOne : o.valueLabel)}`;
   };
 
   m.tip = (i) => {

@@ -45,10 +45,14 @@ export function showShortcuts() {
   sheet.done.then(() => { sheet = null; });
 }
 
+// Inputs that take no text: letters do nothing in them, so shortcuts keep working after using a
+// slider or a checkbox (arrows and Space still belong to the control; see the Space rule below).
+const NON_TEXT_INPUTS = ['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file', 'image'];
+const TEXT_FIELD = `input:not(${NON_TEXT_INPUTS.map((t) => `[type="${t}"]`).join('):not(')}), textarea, select, [contenteditable=""], [contenteditable="true"]`;
+
 function isTyping(target) {
   if (!(target instanceof Element)) return false;
-  if (target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) return true;
-  return false;
+  return !!target.closest(TEXT_FIELD);
 }
 
 function onKey(ev) {
@@ -67,7 +71,7 @@ function onKey(ev) {
 
   if (k === ' ' || k === 'Spacebar') {
     const t = ev.target instanceof Element ? ev.target : null;
-    if (t && t.closest('button, a, [role="button"], [role="slider"], [role="tab"], [role="radio"], [role="option"], summary')) return;
+    if (t && t.closest('button, a, input, [role="button"], [role="slider"], [role="switch"], [role="tab"], [role="radio"], [role="option"], summary')) return;
     ev.preventDefault();
     player.toggle();
     return;

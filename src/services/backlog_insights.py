@@ -399,11 +399,11 @@ def backlog_insights(conn, backlog_history, current_total=None, playlist_id=None
             "inflow": ("Tracks that came into the backlog: the change in its size plus the tracks cleared over the "
                        "same days. Tracks removed directly in Spotify make this an undercount."),
             "net": "Change in backlog size over the window (positive means it grew).",
-            "windows": ("last_7 and last_30 run from the end of the day 7 or 30 days ago to now; since_start runs "
-                        "from the first recorded size. Cleared always covers exactly that window. Added and net "
-                        "need the backlog size on the window's first day, which is only known if the app was "
-                        "running then; otherwise they are empty (exact is false) and 'measured' gives the closest "
-                        "span that can be measured, starting on its own start_day."),
+            # Shown in the UI's info tooltips, so plain words only (the field-level rules are in
+            # _window's docstring).
+            "windows": ("Cleared counts every track removed from your backlog in these days. Added and the "
+                        "change in size need the backlog size from the day before; if the app wasn't running "
+                        "that day, they show the closest span that can be measured instead, with its own dates."),
             "weekly": ("Tracks cleared and added in each calendar week (Monday to Sunday). Added is only known for "
                        "weeks the app recorded the backlog size; weeks it wasn't running show as not measured."),
             "pace": ("Weekly rates over everything recorded since the first backlog snapshot. The app is used in "

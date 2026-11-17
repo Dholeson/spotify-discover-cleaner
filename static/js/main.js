@@ -33,6 +33,7 @@ const VIEWS = {
   search: () => import('./views/search.js'),
   settings: () => import('./views/settings.js'),
   styleguide: () => import('./views/styleguide.js'),
+  setup: () => import('./views/setup.js'),
 };
 
 // Which rail entry is "current" for each route.
@@ -89,15 +90,34 @@ function notFoundView() {
   };
 }
 
+// First run: until a Spotify app is set up, Now shows the Setup steps; once Spotify is connected
+// but no backlog playlist is chosen yet, Now shows the "pick your backlog playlist" step. The
+// offline demo never gates. Returns the setup step to show instead of the route, or null.
+// views/setup.js sets SETUP_CONNECTING after saving the app keys, so the guided flow (not Now's
+// generic "Spotify isn't connected" screen) stays up until the sign-in round trip completes.
+const SETUP_CONNECTING = 'dc.setup.connecting';
+function setupConnecting() {
+  try { return sessionStorage.getItem(SETUP_CONNECTING) === '1'; } catch { return false; }
+}
+function gateFor(route, s) {
+  if (route.id !== 'now' || !s?.setup || s.setup.demo) return null;
+  if (s.setup.needs_credentials) return 'connect';
+  if (s.auth_ready === false && setupConnecting()) return 'connect';
+  if (s.setup.needs_playlist) return 'playlist';
+  return null;
+}
+
 async function showRoute(route, prev, info = {}) {
   const seq = ++navSeq;
   updateNav(route);
   const isFirst = firstRoute;
   firstRoute = false;
-  const params = paramsOf(route);
+  const gate = gateFor(route, store.status);
+  const params = gate ? { ...paramsOf(route), step: gate, gated: '1' } : paramsOf(route);
+  if (gate) route = { ...route, id: 'setup' };
 
   // Same view with an update() hook: let it handle the change in place.
-  if (active && active.id === route.id && typeof active.view.update === 'function') {
+  if (active && active.id === route.id && active.gate === gate && typeof active.view.update === 'function') {
     active.ctx.route = route;
     try {
       const r = active.view.update(params, active.ctx);
@@ -127,7 +147,7 @@ async function showRoute(route, prev, info = {}) {
   const root = freshRoot(view.id || route.id);
   const ctrl = new AbortController();
   const ctx = { api, store, router, ui, charts, signal: ctrl.signal, route, setTitle };
-  active = { id: route.id, key: route.key, view, ctrl, root, ctx };
+  active = { id: route.id, key: route.key, gate, view, ctrl, root, ctx };
   setTitle(view.title);
 
   let mounted;
@@ -174,14 +194,44 @@ function teardown() {
 }
 
 function forwardStatus(status, info) {
-  if (!active || typeof active.view.onStatus !== 'function') return;
+  if (!active) return;
+  // Setup finished (or was undone) while its page is showing: show what the route really is.
+  const route = router.current();
+  if ((active.gate || null) !== gateFor(route, status) && (active.gate || route.id === 'now')) {
+    showRoute(route, null, {});
+    return;
+  }
+  if (typeof active.view.onStatus !== 'function') return;
   try { active.view.onStatus(status, info); } catch (err) { reportError(err); }
+}
+
+// "Offline demo · simulated Spotify" in the top bar (app-config.demo, then /api/status setup.demo).
+function renderDemoBadge(on) {
+  const right = document.querySelector('.topbar-right');
+  let badge = document.getElementById('demo-badge');
+  if (!on) { if (badge) badge.hidden = true; return; }
+  if (!badge && right) {
+    badge = document.createElement('span');
+    badge.id = 'demo-badge';
+    badge.className = 'demo-badge';
+    badge.dataset.tip = 'Nothing here talks to Spotify: playback is simulated over the author’s real listening history. Changes stay on this computer.';
+    badge.dataset.tipPlacement = 'bottom';
+    badge.tabIndex = 0;
+    mount(badge, html`${icon('wifiOff')}<span>Offline demo<span class="demo-badge-sub"> · simulated Spotify</span></span>`);
+    right.prepend(badge);
+  }
+  if (badge) badge.hidden = false;
+  document.body.dataset.demo = '1';
+}
+
+function appConfig() {
+  try { return JSON.parse(document.getElementById('app-config')?.textContent || '{}') || {}; } catch { return {}; }
 }
 
 function renderUser(status) {
   const chip = document.getElementById('user-chip');
   if (!chip) return;
-  const name = status?.user_display_name;
+  const name = status?.auth_ready === false ? '' : status?.user_display_name;
   if (!name) { chip.hidden = true; return; }
   chip.hidden = false;
   const nameEl = chip.querySelector('.user-name');
@@ -252,10 +302,22 @@ async function boot() {
   initConnectionNotice();
   trackToastOffset();
 
-  store.on('status', (s, info) => { renderUser(s); forwardStatus(s, info); });
+  if (appConfig().demo) renderDemoBadge(true);
+  store.on('status', (s, info) => {
+    if (s?.auth_ready) { try { sessionStorage.removeItem(SETUP_CONNECTING); } catch { /* storage off */ } }
+    if (s?.setup?.demo) renderDemoBadge(true);
+    renderUser(s);
+    forwardStatus(s, info);
+  });
+  // The first route may be gated by setup state: give the first /api/status a moment to arrive.
+  const firstStatus = store.status ? null : new Promise((resolve) => {
+    const off = store.on('status', () => { off(); resolve(); });
+    setTimeout(resolve, 1500);
+  });
   store.start();
 
   charts = await loadCharts();
+  if (firstStatus) await firstStatus;
   router.onChange((route, prev, info) => { showRoute(route, prev, info); });
   router.start(viewEl);
 

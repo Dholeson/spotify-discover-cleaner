@@ -18,8 +18,10 @@ function addDays(day, n) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-const signed = (n) => (n == null ? '—' : fmt.signed(n));
-const perWeek = (n) => (n == null ? '—' : fmt.num(n, { digits: n < 10 ? 1 : 0 }));
+// Rates in prose are whole tracks ("about 8 a week"), never "9.8 tracks".
+const whole = (n) => (n == null ? '—' : n > 0 && n < 1 ? 'under 1' : fmt.num(Math.round(n)));
+/** "+203" with an up/down icon (red when the backlog grew, green when it shrank), like every Insights delta. */
+const netChange = (n) => (n == null ? '—' : html`<span class="ins-net ins-net--${n > 0 ? 'grew' : n < 0 ? 'shrank' : 'flat'}">${n ? icon(n > 0 ? 'arrowUp' : 'arrowDown') : ''}<span class="sr-only">${n > 0 ? 'grew by ' : n < 0 ? 'shrank by ' : ''}</span>${fmt.signed(n)}</span>`);
 
 export default function createBacklog({ api, store }) {
   let root = null;
@@ -137,12 +139,12 @@ export default function createBacklog({ api, store }) {
       out.push(html`The pace shows up after a week of use: the app needs a few days of backlog sizes to measure it.`);
       return out;
     }
-    const basis = p.basis_days ? `over the last ${fmt.plural(p.basis_days, 'day')}` : '';
+    const basis = p.basis_days ? ` (averaged over the last ${fmt.plural(p.basis_days, 'day')})` : '';
     if (p.growing) {
-      out.push(html`It's growing: about <strong>${perWeek(p.inflow_per_week)}</strong> tracks come in a week and you clear <strong>${perWeek(p.cleared_per_week)}</strong> ${basis}.`);
-      if (p.needed_per_day_12w != null) out.push(html`Clear <strong>${perWeek(p.needed_per_day_12w)} a day</strong> to empty it in 12 weeks.`);
+      out.push(html`It's growing: about <strong>${whole(p.inflow_per_week)}</strong> tracks come in a week and you clear about <strong>${whole(p.cleared_per_week)} a week</strong>${basis}.`);
+      if (p.needed_per_day_12w != null) out.push(html`Clear <strong>${fmt.num(Math.ceil(p.needed_per_day_12w))} a day</strong> to empty it in 12 weeks.`);
     } else if (p.empty_by_day) {
-      out.push(html`At this pace it's empty by <strong>${dayText(p.empty_by_day, { year: 'always' })}</strong> (${fmt.plural(Math.ceil(p.weeks_to_empty), 'week')}): you clear ${perWeek(p.cleared_per_week)} a week and ${perWeek(p.inflow_per_week)} come in.`);
+      out.push(html`At this pace it's empty by <strong>${dayText(p.empty_by_day, { year: 'always' })}</strong> (${fmt.plural(Math.ceil(p.weeks_to_empty), 'week')}): you clear about ${whole(p.cleared_per_week)} a week and about ${whole(p.inflow_per_week)} come in${basis}.`);
     }
     if (p.best_week && p.best_week.cleared) {
       const tail = p.at_best_week_pace ? html` Weeks like that would empty it by ${dayText(p.at_best_week_pace.empty_by_day, { year: 'always' })}.` : '';
@@ -194,13 +196,12 @@ export default function createBacklog({ api, store }) {
     const m = w.measured;
     const exact = w.exact;
     const main = (label, value, tone, info) => html`<div class="ins-win-stat"><dt>${label}${info ? infoTip(info, { label }) : ''}</dt><dd class="${tone || ''}">${value}</dd></div>`;
-    const netTone = (n) => (n == null ? '' : n > 0 ? 'is-grew' : n < 0 ? 'is-shrank' : '');
     let foot = '';
     if (!exact) {
       const since = m ? dayText(m.start_day, { year: 'auto' }) : null;
       foot = html`<div class="ins-win-foot">
         <p>${icon('info')}<span>The backlog size on ${dayText(w.start_day)} wasn't recorded (the app wasn't running), so tracks added in these ${w.days} days aren't known.</span></p>
-        ${m ? html`<p class="ins-win-measured">Measurable since ${since} (${fmt.plural(m.days, 'day')}): <strong>${fmt.num(m.inflow)}</strong> added, backlog <strong class="${netTone(m.net)}">${signed(m.net)}</strong></p>` : ''}
+        ${m ? html`<p class="ins-win-measured">Measurable since ${since} (${fmt.plural(m.days, 'day')}): <strong>${fmt.num(m.inflow)}</strong> added, backlog <strong>${netChange(m.net)}</strong></p>` : ''}
       </div>`;
     }
     return html`<section class="ins-win" aria-label="${title}">
@@ -208,7 +209,7 @@ export default function createBacklog({ api, store }) {
       <dl class="ins-win-stats">
         ${main('Cleared', fmt.num(w.cleared), 'is-cleared', defs.cleared)}
         ${main('Added', exact ? fmt.num(w.inflow) : 'Not known', exact ? '' : 'is-unknown', defs.inflow)}
-        ${main('Change', exact ? signed(w.net) : 'Not known', exact ? netTone(w.net) : 'is-unknown', defs.net)}
+        ${main('Change', exact ? netChange(w.net) : 'Not known', exact ? '' : 'is-unknown', defs.net)}
       </dl>
       ${foot}
     </section>`;
@@ -245,8 +246,12 @@ export default function createBacklog({ api, store }) {
     const measured = weeks.filter((wk) => wk.added != null);
     const clearedSum = weeks.reduce((a, wk) => a + (wk.cleared || 0), 0);
     const off = weeks.length - measured.length;
+    // No second "cleared since the start" total here (it disagreed with the card above): each
+    // week counts its own different tracks, so a track cleared again in a later week counts twice.
+    const ss = d.windows?.since_start;
+    const again = ss && ss.cleared != null && clearedSum > ss.cleared;
     mount(el('weekly-line'), weeks.length
-      ? html`${fmt.plural(clearedSum, 'track')} cleared over ${fmt.plural(weeks.length, 'week')}. Both charts use the same scale, so bars compare directly.${off ? ` Hollow marks are weeks the app didn't see enough of to count what came in (${off} of ${weeks.length}).` : ''}`
+      ? html`${fmt.plural(weeks.length, 'calendar week')}, Monday to Sunday. Both charts use the same scale, so bars compare directly.${again ? ' A track cleared again in a later week counts in each of those weeks.' : ''}${off ? ` Hollow marks are weeks the app didn't see enough of to count what came in (${off} of ${weeks.length}).` : ''}`
       : 'Weekly figures appear after the app has been running for a while.');
     const c = el('w-cleared').querySelector('figure.chart');
     if (c) c.chart.update(cleared, { max });
