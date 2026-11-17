@@ -1145,8 +1145,21 @@ function flowCells(cleared, added, net) {
  * it wasn't, the API leaves them empty and offers the closest measurable span ("measured"),
  * which is labelled with its own dates — never passed off as "this week".
  */
-function windowMarkup(ins) {
-  const w = ins?.windows?.last_7;
+/** Clears that happened after the backlog numbers were fetched. Insights refetch at most every
+ *  20 s, so without this "Last 7 days" lags the live Today card right after a clear. */
+function clearsSinceInsights() {
+  const since = num(V?.ins?.at);
+  if (!since) return 0;
+  const list = Array.isArray(V?.status?.recently_cleared) ? V.status.recently_cleared : [];
+  return list.filter((e) => e && !e.undone && num(e.ts_ms) > since).length;
+}
+
+function windowMarkup(insData) {
+  const extra = clearsSinceInsights();
+  const bump = (x) => (x && extra ? { ...x, cleared: num(x.cleared) + extra, net: isNum(x.net) ? num(x.net) - extra : x.net } : x);
+  const raw = insData?.windows?.last_7;
+  const w = raw ? { ...bump(raw), measured: bump(raw.measured) } : raw;
+  const ins = insData;
   if (!w) return '';
   const defs = ins.definitions || {};
   const days = num(w.days) || 7;
